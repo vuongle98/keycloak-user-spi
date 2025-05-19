@@ -1,19 +1,25 @@
 package org.vuong.keycloak.spi.repository;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityTransaction;
 import jakarta.persistence.NoResultException;
 import jakarta.persistence.TypedQuery;
-import jakarta.persistence.criteria.CriteriaBuilder;
-import jakarta.persistence.criteria.CriteriaQuery;
-import jakarta.persistence.criteria.Predicate;
-import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.vuong.keycloak.spi.entity.Group; // Needed for join
+import org.vuong.keycloak.spi.entity.Role; // Needed for join
 import org.vuong.keycloak.spi.entity.UserEntity;
+import org.vuong.keycloak.spi.entity.UserProfile; // Needed for join
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 public class UserRepository {
 
+    private static final Logger log = LoggerFactory.getLogger(UserRepository.class);
     private final EntityManager em;
 
     public UserRepository(EntityManager em) {
@@ -21,100 +27,44 @@ public class UserRepository {
     }
 
     public UserEntity findByUsername(String username) {
+        log.debug("UserRepository.findByUsername({})", username);
+        if (username == null || username.trim().isEmpty()) {
+            return null;
+        }
         try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.username = :username", UserEntity.class
-            );
-            query.setParameter("username", username);
-            return query.getSingleResult();
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            cq.where(cb.equal(root.get("username"), username));
+            return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
+            log.debug("User not found with username: {}", username);
             return null;
         }
     }
+
+    // TODO: Add findByUsernameAndRealm(String realmId, String username) if usernames are unique per realm
 
     public UserEntity findByEmail(String email) {
+        log.debug("UserRepository.findByEmail({})", email);
+        if (email == null || email.trim().isEmpty()) {
+            return null;
+        }
         try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.email = :email", UserEntity.class
-            );
-            query.setParameter("email", email);
-            return query.getSingleResult();
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            cq.where(cb.equal(root.get("email"), email));
+            return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
+            log.debug("User not found with email: {}", email);
             return null;
         }
     }
 
-    public List<UserEntity> searchByUsername(String username) {
-        try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.username like :username", UserEntity.class
-            );
-            query.setParameter("username", username);
-            return query.getResultList();
-        } catch (NoResultException e) {
-            return null;
-        }
-    }
-
-    public List<UserEntity> searchByEmail(String email) {
-        try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.email like :email", UserEntity.class
-            );
-            query.setParameter("email", email);
-            return query.getResultList();
-        } catch (NoResultException e) {
-            return null;
-        }
-    }
-
-    public List<UserEntity> searchByLock(Boolean locked) {
-        try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.locked = :locked", UserEntity.class
-            );
-            query.setParameter("locked", locked);
-            return query.getResultList();
-        } catch (NoResultException e) {
-            return null;
-        }
-    }
-
-    public UserEntity getById(String id) {
-        try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u WHERE u.id = :id", UserEntity.class
-            );
-            query.setParameter("id", id);
-            return query.getSingleResult();
-        } catch (NoResultException e) {
-            return null;
-        }
-    }
-
-    public List<UserEntity> getUsers() {
-        try {
-            TypedQuery<UserEntity> query = em.createQuery(
-                    "SELECT u FROM users u", UserEntity.class
-            );
-            return query.getResultList();
-        } catch (NoResultException e) {
-            return List.of();
-        }
-    }
-
-    public int countUsers() {
-        try {
-            TypedQuery<Long> query = em.createQuery(
-                    "SELECT COUNT(u) FROM users u", Long.class
-            );
-            return query.getSingleResult().intValue();
-        } catch (NoResultException e) {
-            return 0;
-        }
-    }
-
+    // Keep the existing search method, note it doesn't filter by realm
     public List<UserEntity> search(String search, String username, String email, Integer firstResult, Integer maxResults) {
+        log.debug("UserRepository.search(search={}, username={}, email={}, first={}, max={}) - (not realm filtered)", search, username, email, firstResult, maxResults);
         CriteriaBuilder cb = em.getCriteriaBuilder();
         CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
         Root<UserEntity> root = cq.from(UserEntity.class);
@@ -130,13 +80,18 @@ public class UserRepository {
         }
 
         if (search != null && !search.isEmpty()) {
+            // Combine search across username and email
             predicates.add(cb.or(
                     cb.like(cb.lower(root.get("username")), "%" + search.toLowerCase() + "%"),
                     cb.like(cb.lower(root.get("email")), "%" + search.toLowerCase() + "%")
+                    // TODO: Add search across UserProfile fields (firstName, lastName, etc.) here if needed
             ));
         }
+        // TODO: Add realm filtering here if necessary: predicates.add(cb.equal(root.get("realmId"), realmId));
 
-        cq.where(predicates.toArray(new Predicate[0]));
+
+        cq.where(cb.and(predicates.toArray(new Predicate[0])));
+        // Optional: Add ordering, e.g., cq.orderBy(cb.asc(root.get("username")));
 
         TypedQuery<UserEntity> query = em.createQuery(cq);
 
@@ -150,33 +105,389 @@ public class UserRepository {
         return query.getResultList();
     }
 
-    public List<UserEntity> findByAttribute(String attrName, String attrValue) {
-        // Giả sử có cột attributes kiểu Map trong UserEntity
-        String jpql = "SELECT u FROM users u JOIN u.attributes attr WHERE KEY(attr) = :attrName AND VALUE(attr) = :attrValue";
-        TypedQuery<UserEntity> query = em.createQuery(jpql, UserEntity.class);
-        query.setParameter("attrName", attrName);
-        query.setParameter("attrValue", attrValue);
+
+    public UserEntity getById(String id) {
+        log.debug("UserRepository.getById({})", id);
+        if (id == null || id.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            // Assuming UserEntity ID is Long, convert String ID to Long
+            Long userIdLong = Long.valueOf(id);
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            cq.where(cb.equal(root.get("id"), userIdLong));
+            return em.createQuery(cq).getSingleResult();
+        } catch (NoResultException e) {
+            log.debug("User not found with ID: {}", id);
+            return null;
+        } catch (NumberFormatException e) {
+            log.warn("Invalid user ID format: {}", id, e);
+            return null;
+        }
+    }
+
+    public int countUsers() {
+        log.debug("UserRepository.countUsers() - (not realm filtered)");
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<Long> cq = cb.createQuery(Long.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            cq.select(cb.count(root));
+            // TODO: Add realm filtering here if necessary: cq.where(cb.equal(root.get("realmId"), realmId));
+            return em.createQuery(cq).getSingleResult().intValue();
+        } catch (NoResultException e) {
+            return 0;
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs
+    public int countUsersByRealm(String realmId) {
+        log.debug("UserRepository.countUsersByRealm(realmId={})", realmId);
+        if (realmId == null || realmId.trim().isEmpty()) {
+            return 0;
+        }
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<Long> cq = cb.createQuery(Long.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            List<Predicate> predicates = new ArrayList<>();
+
+            // Filter by realm
+            predicates.add(cb.equal(root.get("realmId"), realmId)); // Assuming UserEntity has realmId
+
+            cq.select(cb.count(root)).where(cb.and(predicates.toArray(new Predicate[0])));
+            return em.createQuery(cq).getSingleResult().intValue();
+        } catch (NoResultException e) {
+            return 0;
+        }
+    }
+
+
+    public void save(UserEntity user) {
+        log.debug("UserRepository.save({})", user != null ? user.getUsername() : "null");
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            if (user.getId() == null) { // Assuming ID is auto-generated for new entities
+                em.persist(user);
+            } else { // For existing entities, check if managed before merging
+                if (em.contains(user)) {
+                    em.merge(user);
+                } else {
+                    em.merge(user);
+                }
+            }
+            tx.commit();
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to save user {}: {}", user != null ? user.getUsername() : "null", e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    public void delete(UserEntity user) {
+        log.debug("UserRepository.delete({})", user != null ? user.getUsername() : "null");
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            UserEntity merged = em.contains(user) ? user : em.merge(user);
+            em.remove(merged);
+            tx.commit();
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to delete user {}: {}", user != null ? user.getUsername() : "null", e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    public void delete(String userId) {
+        log.debug("UserRepository.delete(id={})", userId);
+        if (userId == null || userId.trim().isEmpty()) {
+            log.warn("Attempted to delete user with empty ID.");
+            return;
+        }
+        try {
+            Long userIdLong = Long.valueOf(userId);
+            UserEntity user = em.find(UserEntity.class, userIdLong);
+            if (user != null) {
+                // Note: Ensure cascading deletes are configured for UserProfile, user_roles, user_groups
+                // or handle them explicitly here before removing the user entity.
+                delete(user); // Delegate to delete(UserEntity)
+            } else {
+                log.warn("User not found for deletion with ID: {}", userId);
+            }
+        } catch (NumberFormatException e) {
+            log.warn("Invalid user ID format for deletion: {}", userId, e);
+        } catch (Exception e) {
+            log.error("Failed to delete user with ID {}: {}", userId, e.getMessage(), e);
+            throw e; // Re-throw exception after logging
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs
+    public List<UserEntity> findUsersByGroupId(String realmId, String groupId, Integer firstResult, Integer maxResults) {
+        log.debug("UserRepository.findUsersByGroupId(realmId={}, groupId={}, first={}, max={})", realmId, groupId, firstResult, maxResults);
+        if (realmId == null || realmId.trim().isEmpty() || groupId == null || groupId.trim().isEmpty()) {
+            return new ArrayList<>();
+        }
+        Long groupIdLong;
+        try {
+            groupIdLong = Long.valueOf(groupId);
+        } catch (NumberFormatException e) {
+            log.warn("Invalid group ID format for findUsersByGroupId: {}", groupId, e);
+            return new ArrayList<>();
+        }
+
+        CriteriaBuilder cb = em.getCriteriaBuilder();
+        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+        Root<UserEntity> root = cq.from(UserEntity.class);
+        Join<UserEntity, Group> groupsJoin = root.join("groups"); // Join the many-to-many groups relationship
+
+        List<Predicate> predicates = new ArrayList<>();
+
+        // Filter by realm (assuming UserEntity has realmId)
+        predicates.add(cb.equal(root.get("realmId"), realmId));
+        // Filter by group ID in the joined table
+        predicates.add(cb.equal(groupsJoin.get("id"), groupIdLong));
+
+        cq.where(cb.and(predicates.toArray(new Predicate[0])));
+        // Add distinct to avoid duplicate users if a user is in the same group multiple times (unlikely but good practice)
+        cq.distinct(true);
+        // Optional: Add ordering, e.g., cq.orderBy(cb.asc(root.get("username")));
+
+
+        TypedQuery<UserEntity> query = em.createQuery(cq);
+
+        if (firstResult != null) {
+            query.setFirstResult(firstResult);
+        }
+        if (maxResults != null) {
+            query.setMaxResults(maxResults);
+        }
+
         return query.getResultList();
     }
 
-//    public List<UserEntity> findByGroupId(String groupId, Integer firstResult, Integer maxResults) {
-//        CriteriaBuilder cb = em.getCriteriaBuilder();
-//        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
-//        Root<UserEntity> userRoot = cq.from(UserEntity.class);
-//
-//        Join<UserEntity, GroupEntity> groupJoin = userRoot.join("groups"); // tên thuộc tính groups trong UserEntity
-//
-//        cq.where(cb.equal(groupJoin.get("id"), groupId));
-//
-//        TypedQuery<UserEntity> query = entityManager.createQuery(cq);
-//
-//        if (firstResult != null) {
-//            query.setFirstResult(firstResult);
-//        }
-//        if (maxResults != null) {
-//            query.setMaxResults(maxResults);
-//        }
-//
-//        return query.getResultList();
-//    }
+    // Implemented based on CustomUserStorageProvider needs
+    public List<UserEntity> findUsersByAttribute(String realmId, String attrName, String attrValue) {
+        log.debug("UserRepository.findUsersByAttribute(realmId={}, attrName={}, attrValue={})", realmId, attrName, attrValue);
+        if (realmId == null || realmId.trim().isEmpty() || attrName == null || attrName.trim().isEmpty() || attrValue == null || attrValue.trim().isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        CriteriaBuilder cb = em.getCriteriaBuilder();
+        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+        Root<UserEntity> root = cq.from(UserEntity.class);
+        List<Predicate> predicates = new ArrayList<>();
+
+        // Filter by realm (assuming UserEntity has realmId)
+        predicates.add(cb.equal(root.get("realmId"), realmId));
+
+        // --- Handle common attributes based on UserEntity and UserProfile ---
+        // This is a simplified example. You might need a more complex structure
+        // if you have truly dynamic user attributes.
+        switch (attrName) {
+            case "username":
+                predicates.add(cb.like(cb.lower(root.get("username")), "%" + attrValue.toLowerCase() + "%"));
+                break;
+            case "email":
+                predicates.add(cb.like(cb.lower(root.get("email")), "%" + attrValue.toLowerCase() + "%"));
+                break;
+            case "locked":
+                // Assuming attrValue is "true" or "false"
+                try {
+                    boolean lockedStatus = Boolean.parseBoolean(attrValue);
+                    predicates.add(cb.equal(root.get("locked"), lockedStatus));
+                } catch (IllegalArgumentException e) {
+                    log.warn("Invalid boolean value for 'locked' attribute search: {}", attrValue);
+                    return new ArrayList<>(); // Invalid value, no results
+                }
+                break;
+            case "isVerifiedEmail":
+                // Assuming attrValue is "true" or "false"
+                try {
+                    boolean verifiedStatus = Boolean.parseBoolean(attrValue);
+                    predicates.add(cb.equal(root.get("isVerifiedEmail"), verifiedStatus));
+                } catch (IllegalArgumentException e) {
+                    log.warn("Invalid boolean value for 'isVerifiedEmail' attribute search: {}", attrValue);
+                    return new ArrayList<>(); // Invalid value, no results
+                }
+                break;
+            // --- Handle UserProfile attributes ---
+            case "firstName":
+            case "lastName":
+            case "phone":
+            case "address":
+            case "avatarUrl":
+                Join<UserEntity, UserProfile> profileJoin = root.join("profile"); // Join the one-to-one profile relationship
+                predicates.add(cb.like(cb.lower(profileJoin.get(attrName)), "%" + attrValue.toLowerCase() + "%"));
+                break;
+            // Add other attributes as needed
+            default:
+                log.warn("Unsupported attribute name for search: {}", attrName);
+                return new ArrayList<>(); // Attribute not supported for search
+        }
+
+        cq.where(cb.and(predicates.toArray(new Predicate[0])));
+        // Optional: Add ordering
+
+        return em.createQuery(cq).getResultList();
+    }
+
+    // Implemented based on CustomUserStorageProvider needs
+    public void deleteAllUsersByRealm(String realmId) {
+        log.debug("UserRepository.deleteAllUsersByRealm(realmId={})", realmId);
+        if (realmId == null || realmId.trim().isEmpty()) {
+            log.warn("Attempted to delete all users with empty realmId.");
+            return;
+        }
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            // Note: This assumes cascade deletes are configured for UserProfile, user_roles, user_groups.
+            // If not, you need to delete from join tables and UserProfile first explicitly.
+            // Example explicit deletions (assuming join table names and column names):
+            // em.createQuery("DELETE FROM users_roles ur WHERE ur.users_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            //    .setParameter("realmId", realmId).executeUpdate();
+            // em.createQuery("DELETE FROM users_groups ug WHERE ug.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            //    .setParameter("realmId", realmId).executeUpdate();
+            // em.createQuery("DELETE FROM user_profiles up WHERE up.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            //    .setParameter("realmId", realmId).executeUpdate();
+
+            // Delete users by realmId (relies on configured cascades or prior explicit deletes)
+            em.createQuery("DELETE FROM users u WHERE u.realmId = :realmId")
+                    .setParameter("realmId", realmId)
+                    .executeUpdate();
+            tx.commit();
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to delete all users for realm {}: {}", realmId, e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs (assignment removal)
+    public void removeUserMappingsForGroup(String groupId) {
+        log.debug("UserRepository.removeUserMappingsForGroup(groupId={})", groupId);
+        if (groupId == null || groupId.trim().isEmpty()) {
+            log.warn("Attempted to remove user mappings for empty groupId.");
+            return;
+        }
+        try {
+            Long groupIdLong = Long.valueOf(groupId);
+            EntityTransaction tx = em.getTransaction();
+            tx.begin();
+            // Delete entries from the users_groups join table for the given group ID
+            em.createNativeQuery("DELETE FROM users_groups WHERE groups_id = :groupId")
+                    .setParameter("groupId", groupIdLong) // Assuming groups_id column and Long ID
+                    .executeUpdate();
+            tx.commit();
+        } catch (NumberFormatException e) {
+            log.warn("Invalid group ID format for removeUserMappingsForGroup: {}", groupId, e);
+        } catch (Exception e) {
+            log.error("Failed to remove user mappings for group {}: {}", groupId, e.getMessage(), e);
+            throw e; // Re-throw exception
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs (assignment removal)
+    public void removeUserMappingsForRole(String roleId) {
+        log.debug("UserRepository.removeUserMappingsForRole(roleId={})", roleId);
+        if (roleId == null || roleId.trim().isEmpty()) {
+            log.warn("Attempted to remove user mappings for empty roleId.");
+            return;
+        }
+        try {
+            Long roleIdLong = Long.valueOf(roleId);
+            EntityTransaction tx = em.getTransaction();
+            tx.begin();
+            // Delete entries from the users_roles join table for the given role ID
+            em.createNativeQuery("DELETE FROM users_roles WHERE roles_id = :roleId")
+                    .setParameter("roleId", roleIdLong) // Assuming roles_id column and Long ID
+                    .executeUpdate();
+            tx.commit();
+        } catch (NumberFormatException e) {
+            log.warn("Invalid role ID format for removeUserMappingsForRole: {}", roleId, e);
+        } catch (Exception e) {
+            log.error("Failed to remove user mappings for role {}: {}", roleId, e.getMessage(), e);
+            throw e; // Re-throw exception
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs (assignment removal)
+    public void deleteAllAssignmentsForRealmRoles(String realmId) {
+        log.debug("UserRepository.deleteAllAssignmentsForRealmRoles(realmId={})", realmId);
+        if (realmId == null || realmId.trim().isEmpty()) {
+            log.warn("Attempted to delete realm role assignments with empty realmId.");
+            return;
+        }
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            // Delete entries from users_roles where the role is a realm role in the specified realm
+            em.createNativeQuery("DELETE FROM users_roles ur WHERE ur.roles_id IN (SELECT r.id FROM roles r WHERE r.realmId = :realmId AND r.clientId IS NULL)")
+                    .setParameter("realmId", realmId) // Assuming Role entity has realmId
+                    .executeUpdate();
+            tx.commit();
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to delete all realm role assignments for realm {}: {}", realmId, e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    // Implemented based on CustomUserStorageProvider needs (assignment removal)
+    public void deleteAllAssignmentsForClientRoles(String clientId) {
+        log.debug("UserRepository.deleteAllAssignmentsForClientRoles(clientId={})", clientId);
+        if (clientId == null || clientId.trim().isEmpty()) {
+            log.warn("Attempted to delete client role assignments with empty clientId.");
+            return;
+        }
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            // Delete entries from users_roles where the role is a client role for the specified client
+            em.createNativeQuery("DELETE FROM users_roles ur WHERE ur.roles_id IN (SELECT r.id FROM roles r WHERE r.clientId = :clientId)")
+                    .setParameter("clientId", clientId) // Assuming Role entity has clientId
+                    .executeUpdate();
+            tx.commit();
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to delete all client role assignments for client {}: {}", clientId, e.getMessage(), e);
+            throw e;
+        }
+    }
+
+
+    // Implemented based on CustomUserStorageProvider needs (for grantToAllUsers)
+    public List<UserEntity> getAllUsers(String realmId, Integer first, Integer max) {
+        log.debug("UserRepository.getAllUsers(realmId={}, first={}, max={})", realmId, first, max);
+        if (realmId == null || realmId.trim().isEmpty()) {
+            return new ArrayList<>();
+        }
+        CriteriaBuilder cb = em.getCriteriaBuilder();
+        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+        Root<UserEntity> root = cq.from(UserEntity.class);
+        List<Predicate> predicates = new ArrayList<>();
+
+        // Filter by realm (assuming UserEntity has realmId)
+        predicates.add(cb.equal(root.get("realmId"), realmId));
+
+        cq.where(cb.and(predicates.toArray(new Predicate[0])));
+        // Optional: Add ordering, e.g., cq.orderBy(cb.asc(root.get("id")));
+
+        TypedQuery<UserEntity> query = em.createQuery(cq);
+
+        if (first != null) {
+            query.setFirstResult(first);
+        }
+        if (max != null) {
+            query.setMaxResults(max);
+        }
+
+        return query.getResultList();
+    }
+
 }

@@ -1,51 +1,61 @@
 package org.vuong.keycloak.spi.entity;
 
 import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
-import java.util.Date;
+import java.io.Serializable;
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
 
+
+@Getter
+@Setter
+@AllArgsConstructor
+@NoArgsConstructor
 @Entity(name = "users")
 @Table(name = "users")
-public class UserEntity {
+public class UserEntity implements Serializable {
 
     @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(unique = true, nullable = false)
     private String username;
 
-    @Column(nullable = false)
     private String password;
 
     private String email;
 
     private Boolean locked;
 
-    @Column(name = "created_at", nullable = false)
-    private Date createdAt;
+    @Column(name = "is_verified_email")
+    private Boolean isVerifiedEmail = false;
 
-    // Getters and setters
-    public Long getId() { return id; }
+    @OneToOne(cascade = CascadeType.ALL, fetch = FetchType.EAGER)
+    private UserProfile profile;
 
-    public void setId(Long id) { this.id = id; }
+    @ManyToMany(fetch = FetchType.LAZY)
+    @JoinTable(name = "users_roles", joinColumns = @JoinColumn(name = "users_id"), inverseJoinColumns = @JoinColumn(name = "roles_id"))
+    private Set<Role> roles = new HashSet<>();
 
-    public String getUsername() { return username; }
+    @ManyToMany(fetch = FetchType.LAZY)
+    @JoinTable(name = "users_groups", joinColumns = @JoinColumn(name = "user_id"), inverseJoinColumns = @JoinColumn(name = "groups_id"))
+    private Set<Group> groups = new HashSet<>();
 
-    public void setUsername(String username) { this.username = username; }
+    @Column(name = "created_by")
+    private String createdBy;
 
-    public String getPassword() { return password; }
+    @Column(name = "updated_by")
+    private String updatedBy;
 
-    public void setPassword(String password) { this.password = password; }
+    @Column(name = "created_at")
+    private Instant createdAt;
 
-    public String getEmail() { return email; }
-
-    public void setEmail(String email) { this.email = email; }
-
-    public Boolean getLocked() { return locked; }
-
-    public void setLocked(Boolean locked) { this.locked = locked; }
-
-    public Date getCreatedAt() { return createdAt; }
-
-    public void setCreatedAt(Date createdAt) { this.createdAt = createdAt; }
+    @Column(name = "updated_at")
+    private Instant updatedAt;
 }

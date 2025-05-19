@@ -2,6 +2,12 @@
              version="2.2">
     <persistence-unit name="keycloak-users">
         <class>org.vuong.keycloak.spi.entity.UserEntity</class>
+        <class>org.vuong.keycloak.spi.entity.Role</class>
+        <class>org.vuong.keycloak.spi.entity.Group</class>
+        <class>org.vuong.keycloak.spi.entity.UserProfile</class>
+        <class>org.vuong.keycloak.spi.entity.Permission</class>
+        <exclude-unlisted-classes>false</exclude-unlisted-classes>
+
         <properties>
             <property name="javax.persistence.jdbc.driver" value="org.postgresql.Driver"/>
             <property name="javax.persistence.jdbc.url" value="jdbc:postgresql://localhost:5432/core"/>

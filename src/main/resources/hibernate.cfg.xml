@@ -21,5 +21,9 @@
 
         <!-- Entity class mappings -->
         <mapping class="org.vuong.keycloak.spi.entity.UserEntity"/>
+        <mapping class="org.vuong.keycloak.spi.entity.UserProfile"/>
+        <mapping class="org.vuong.keycloak.spi.entity.Role"/>
+        <mapping class="org.vuong.keycloak.spi.entity.Permission"/>
+        <mapping class="org.vuong.keycloak.spi.entity.Group"/>
     </session-factory>
 </hibernate-configuration>
