@@ -8,12 +8,14 @@ import jakarta.persistence.criteria.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.entity.Group;
-import org.vuong.keycloak.spi.entity.Role; // Needed for join
+import org.vuong.keycloak.spi.entity.Role;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID; // Import UUID for validation
+import java.util.regex.Pattern; // Optional: For simple UUID format check
 import java.util.stream.Collectors;
 
 
@@ -21,6 +23,10 @@ public class GroupRepository {
 
     private static final Logger log = LoggerFactory.getLogger(GroupRepository.class);
     private final EntityManager em;
+
+    // Optional: Pre-compile UUID pattern for potential format check
+    private static final Pattern UUID_PATTERN = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+
 
     public GroupRepository(EntityManager em) {
         this.em = em;
@@ -31,22 +37,54 @@ public class GroupRepository {
         if (id == null || id.trim().isEmpty()) {
             return null;
         }
+
+        // Try to parse as Long (external ID)
         try {
-            // Assuming Group entity ID is Long, convert String ID to Long
             Long groupIdLong = Long.valueOf(id);
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<Group> cq = cb.createQuery(Group.class);
             Root<Group> root = cq.from(Group.class);
-            cq.where(cb.equal(root.get("id"), groupIdLong));
+            cq.where(cb.equal(root.get("id"), groupIdLong)); // Query by external Long ID
             return em.createQuery(cq).getSingleResult();
-        } catch (NoResultException e) {
-            log.debug("Group not found with ID: {}", id);
-            return null;
         } catch (NumberFormatException e) {
-            log.warn("Invalid group ID format: {}", id, e);
-            return null;
+            // If it's not a Long, it might be a Keycloak UUID or composite ID
+            log.debug("Group ID {} is not a valid Long format. Trying as Keycloak ID.", id);
+            // Fall through to check if it's a Keycloak ID (UUID)
+        }
+
+        // If not found by Long ID, try to find by Keycloak ID (UUID)
+        // Note: StorageId.externalId(id) should extract the Long string from composite ID.
+        // If Keycloak passes raw UUID, StorageId.externalId will likely return null.
+        // So, we'll directly use the received 'id' to look up by Keycloak ID.
+        // Add a check to see if the string looks like a UUID before querying by keycloakId.
+        if (isUUID(id)) { // Use helper method or try-catch UUID.fromString
+            log.debug("Group ID {} looks like a UUID. Attempting lookup by Keycloak ID.", id);
+            return findByKeycloakId(id); // New method
+        } else {
+            // If it's not a Long and doesn't look like a UUID (might be composite or something else)
+            // In case of composite ID like "provider_alias.external_id", StorageId.externalId should handle extraction.
+            // The initial NumberFormatException suggests it wasn't a Long *after* extraction or wasn't extracted.
+            // This scenario might need further debugging based on the actual ID format Keycloak sends.
+            log.warn("Group ID {} is not a Long and doesn't look like a UUID. Cannot perform lookup by ID format.", id);
+            return null; // ID format not recognized
         }
     }
+
+    // Helper method to check if a string is a valid UUID format
+    private boolean isUUID(String id) {
+        if (id == null || id.length() != 36) { // Standard UUID length with hyphens
+            return false;
+        }
+        // Simple regex check or try-catch UUID.fromString
+        return UUID_PATTERN.matcher(id).matches();
+//         try {
+//             UUID.fromString(id);
+//             return true;
+//         } catch (IllegalArgumentException e) {
+//             return false;
+//         }
+    }
+
 
     public Group findByName(String name) {
         log.debug("GroupRepository.findByName({}) - generic find (not realm/parent filtered)", name);
@@ -85,7 +123,7 @@ public class GroupRepository {
         } else {
             // Searching for a subgroup with a specific parent
             try {
-                Long parentIdLong = Long.valueOf(parentId);
+                Long parentIdLong = Long.valueOf(parentId); // Parent ID is expected to be a Long string from Keycloak's externalId
                 predicates.add(cb.equal(root.get("parentId"), parentIdLong));
             } catch (NumberFormatException e) {
                 log.warn("Invalid parent group ID format for findGroupByNameAndParent: {}", parentId, e);
@@ -99,6 +137,24 @@ public class GroupRepository {
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
             log.debug("Group not found with name {} and parentId {} in realm {}", name, parentId, realmId);
+            return null;
+        }
+    }
+
+    // Add this new method to find a group by its Keycloak UUID
+    public Group findByKeycloakId(String keycloakId) {
+        log.debug("GroupRepository.findByKeycloakId({})", keycloakId);
+        if (keycloakId == null || keycloakId.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<Group> cq = cb.createQuery(Group.class);
+            Root<Group> root = cq.from(Group.class);
+            cq.where(cb.equal(root.get("keycloakId"), keycloakId)); // Query by Keycloak UUID
+            return em.createQuery(cq).getSingleResult();
+        } catch (NoResultException e) {
+            log.debug("Group not found with keycloakId: {}", keycloakId);
             return null;
         }
     }
@@ -170,28 +226,74 @@ public class GroupRepository {
         predicates.add(cb.equal(root.get("realmId"), realmId)); // Assuming Group has realmId
 
         List<Long> groupIdsLong = new ArrayList<>();
+        List<String> keycloakGroupIds = new ArrayList<>();
+
         if (groupIds != null && !groupIds.isEmpty()) {
-            groupIdsLong = groupIds.stream()
-                    .map(id -> {
-                        try { return Long.valueOf(id); }
-                        catch (NumberFormatException e) { log.warn("Invalid group ID format in list: {}", id); return null; }
-                    })
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
+            for (String id : groupIds) {
+                // Attempt to parse as Long (external ID)
+                try {
+                    groupIdsLong.add(Long.valueOf(id));
+                } catch (NumberFormatException e) {
+                    // If it's not a Long, it might be a Keycloak UUID or composite ID
+                    log.debug("Group ID {} in list is not a valid Long format. Adding to Keycloak ID list.", id);
+                    // Assume it's a Keycloak ID (UUID or composite) and add to a separate list
+                    keycloakGroupIds.add(id);
+                }
+            }
         }
+
+        List<Predicate> idPredicates = new ArrayList<>();
+        if (!groupIdsLong.isEmpty()) {
+            idPredicates.add(root.get("id").in(groupIdsLong)); // Query by external Long IDs
+        }
+        if (!keycloakGroupIds.isEmpty()) {
+            // Query by Keycloak UUIDs (need findByKeycloakId logic) or composite IDs
+            // For composite IDs, need to extract external ID.
+            // For raw UUIDs, need to query keycloakId column.
+            // The simplest is to add predicates for both cases if the IDs might be mixed types in the list.
+            List<String> extractedExternalIds = new ArrayList<>();
+            List<String> rawKeycloakIds = new ArrayList<>();
+
+            for (String kId : keycloakGroupIds) {
+                String extracted = org.keycloak.storage.StorageId.externalId(kId);
+                if (extracted != null) {
+                    extractedExternalIds.add(extracted); // Add extracted external ID string
+                } else if (isUUID(kId)) { // Check if the raw ID looks like a UUID
+                    rawKeycloakIds.add(kId); // Add raw UUID
+                } else {
+                    log.warn("Group ID {} in list not recognized as Long, composite, or UUID.", kId);
+                }
+            }
+
+            // Add predicates for extracted external IDs (converted to Long)
+            if (!extractedExternalIds.isEmpty()) {
+                try {
+                    List<Long> extractedLongIds = extractedExternalIds.stream().map(Long::valueOf).collect(Collectors.toList());
+                    idPredicates.add(root.get("id").in(extractedLongIds));
+                } catch (NumberFormatException e) {
+                    log.warn("Error converting extracted external IDs to Long: {}", extractedExternalIds, e);
+                }
+            }
+            // Add predicates for raw Keycloak UUIDs (query keycloakId column)
+            if (!rawKeycloakIds.isEmpty()) {
+                idPredicates.add(root.get("keycloakId").in(rawKeycloakIds)); // Query by Keycloak UUID
+            }
+        }
+
 
         if (search != null && !search.trim().isEmpty()) {
             Predicate searchPredicate = cb.like(cb.lower(root.get("name")), "%" + search.toLowerCase() + "%");
-            if (!groupIdsLong.isEmpty()) {
-                // If both IDs and search are provided, typically it's IDs OR search criteria matching
-                predicates.add(cb.or(root.get("id").in(groupIdsLong), searchPredicate));
+
+            if (!idPredicates.isEmpty()) {
+                // If both IDs/Keycloak IDs and search are provided, combine with OR
+                predicates.add(cb.or(cb.or(idPredicates.toArray(new Predicate[0])), searchPredicate));
             } else {
                 // Only search criteria
                 predicates.add(searchPredicate);
             }
-        } else if (!groupIdsLong.isEmpty()) {
-            // Only IDs provided
-            predicates.add(root.get("id").in(groupIdsLong));
+        } else if (!idPredicates.isEmpty()) {
+            // Only IDs/Keycloak IDs provided
+            predicates.add(cb.or(idPredicates.toArray(new Predicate[0])));
         } else {
             // No IDs and no search term, return empty list as per Keycloak behavior expectation
             return new ArrayList<>();
@@ -355,13 +457,18 @@ public class GroupRepository {
         if (realmId == null || realmId.trim().isEmpty() || roleId == null || roleId.trim().isEmpty()) {
             return new ArrayList<>();
         }
+        // Role IDs from Keycloak are expected to be composite IDs or external IDs (Long strings)
         Long roleIdLong;
         try {
-            roleIdLong = Long.valueOf(roleId);
+            roleIdLong = Long.valueOf(org.keycloak.storage.StorageId.externalId(roleId)); // Extract external ID and parse
         } catch (NumberFormatException e) {
-            log.warn("Invalid role ID format for findGroupsByRoleId: {}", roleId, e);
+            log.warn("Invalid role ID format (after extraction) for findGroupsByRoleId: {}", roleId, e);
             return new ArrayList<>(); // Invalid role ID format
+        } catch (IllegalArgumentException e) {
+            log.warn("Could not extract external ID from roleId for findGroupsByRoleId: {}", roleId, e);
+            return new ArrayList<>(); // Invalid composite ID format
         }
+
 
         CriteriaBuilder cb = em.getCriteriaBuilder();
         CriteriaQuery<Group> cq = cb.createQuery(Group.class);
@@ -373,7 +480,7 @@ public class GroupRepository {
         // Filter by realm (assuming Group has realmId)
         predicates.add(cb.equal(root.get("realmId"), realmId)); // Assuming Group has realmId
         // Filter by role ID in the joined table
-        predicates.add(cb.equal(rolesJoin.get("id"), roleIdLong));
+        predicates.add(cb.equal(rolesJoin.get("id"), roleIdLong)); // Compare with external Long Role ID
 
         cq.where(cb.and(predicates.toArray(new Predicate[0])));
         // Add distinct to avoid duplicate groups if a group has multiple roles matching the criteria
@@ -482,35 +589,30 @@ public class GroupRepository {
         }
     }
 
-    // Method to delete group by String ID, converting to Long.
-    // Useful if CustomUserStorageProvider prefers passing String IDs directly for deletion.
+    // Method to delete group by String ID, handling Long (external) or UUID (Keycloak)
     public void delete(String groupId) {
         log.debug("GroupRepository.delete(id={})", groupId);
         if (groupId == null || groupId.trim().isEmpty()) {
             log.warn("Attempted to delete group with empty ID.");
             return;
         }
-        try {
-            Long groupIdLong = Long.valueOf(groupId);
-            Group group = em.find(Group.class, groupIdLong);
-            if (group != null) {
-                // Handle removal of children and associations before deleting the group itself.
-                // If not handled by cascade, do it here or in delete(Group).
-                // TODO: Implement removeUserMappingsForGroup in UserRepository
-                // TODO: Implement removeRoleMappingsForGroup here or elsewhere
-                log.warn("delete(String groupId) - assignment/child removal not fully implemented.");
-                // userRepository.removeUserMappingsForGroup(String.valueOf(group.getId()));
-                // removeRoleMappingsForGroup(String.valueOf(group.getId()));
 
-                delete(group); // Delegate to delete(Group)
-            } else {
-                log.warn("Group not found for deletion with ID: {}", groupId);
-            }
-        } catch (NumberFormatException e) {
-            log.warn("Invalid group ID format for deletion: {}", groupId, e);
-        } catch (Exception e) {
-            log.error("Failed to delete group with ID {}: {}", groupId, e.getMessage(), e);
-            throw e; // Re-throw exception after logging
+        // Attempt to find the group by the provided ID (could be external Long or Keycloak UUID)
+        Group group = getById(groupId); // getById handles both Long and Keycloak UUID lookups
+
+        if (group != null) {
+            // Handle removal of children and associations before deleting the group itself.
+            // If not handled by cascade, do it here or in delete(Group).
+            // TODO: Implement removeUserMappingsForGroup in UserRepository
+            // TODO: Implement removeRoleMappingsForGroup here or elsewhere
+            log.warn("delete(String groupId) - assignment/child removal not fully implemented.");
+            // userRepository.removeUserMappingsForGroup(String.valueOf(group.getId())); // Needs implementation
+            // removeRoleMappingsForGroup(String.valueOf(group.getId())); // Needs implementation
+
+            delete(group); // Delegate to delete(Group)
+            log.info("Successfully deleted group with ID (external or keycloak): {}", groupId);
+        } else {
+            log.warn("Group not found for deletion with ID (external or keycloak): {}", groupId);
         }
     }
 
@@ -550,19 +652,27 @@ public class GroupRepository {
             log.warn("Attempted to remove role mappings for empty groupId.");
             return;
         }
+
+        // Resolve the Group ID (could be external Long or Keycloak UUID) to the external Long ID
+        Group group = getById(groupId); // Use getById to find the group entity
+
+        if (group == null) {
+            log.warn("Group not found for removing role mappings with ID (external or keycloak): {}", groupId);
+            return; // Cannot remove mappings for a non-existent group
+        }
+
         try {
-            Long groupIdLong = Long.valueOf(groupId);
+            Long groupIdLong = group.getId(); // Use the external Long ID from the entity
             EntityTransaction tx = em.getTransaction();
             tx.begin();
-            // Delete entries from the groups_roles join table for the given group ID
+            // Delete entries from the groups_roles join table for the given group's external Long ID
             em.createNativeQuery("DELETE FROM groups_roles WHERE groups_id = :groupId")
                     .setParameter("groupId", groupIdLong) // Assuming groups_id column and Long ID
                     .executeUpdate();
             tx.commit();
-        } catch (NumberFormatException e) {
-            log.warn("Invalid group ID format for removeRoleMappingsForGroup: {}", groupId, e);
+            log.info("Successfully removed role mappings for group (external ID) {}", groupIdLong);
         } catch (Exception e) {
-            log.error("Failed to remove role mappings for group {}: {}", groupId, e.getMessage(), e);
+            log.error("Failed to remove role mappings for group with ID (external or keycloak) {}: {}", groupId, e.getMessage(), e);
             throw e; // Re-throw exception
         }
     }

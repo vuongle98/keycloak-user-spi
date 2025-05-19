@@ -7,10 +7,10 @@ import jakarta.persistence.TypedQuery;
 import jakarta.persistence.criteria.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.vuong.keycloak.spi.entity.Group; // Needed for join
-import org.vuong.keycloak.spi.entity.Role; // Needed for join
+import org.vuong.keycloak.spi.entity.Group;
+import org.vuong.keycloak.spi.entity.Role;
 import org.vuong.keycloak.spi.entity.UserEntity;
-import org.vuong.keycloak.spi.entity.UserProfile; // Needed for join
+import org.vuong.keycloak.spi.entity.UserProfile;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -62,6 +62,25 @@ public class UserRepository {
         }
     }
 
+    // Add this new method to find a user by their Keycloak UUID
+    public UserEntity findByKeycloakId(String keycloakId) {
+        log.debug("UserRepository.findByKeycloakId({})", keycloakId);
+        if (keycloakId == null || keycloakId.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            cq.where(cb.equal(root.get("keycloakId"), keycloakId));
+            return em.createQuery(cq).getSingleResult();
+        } catch (NoResultException e) {
+            log.debug("User not found with keycloakId: {}", keycloakId);
+            return null;
+        }
+    }
+
+
     // Keep the existing search method, note it doesn't filter by realm
     public List<UserEntity> search(String search, String username, String email, Integer firstResult, Integer maxResults) {
         log.debug("UserRepository.search(search={}, username={}, email={}, first={}, max={}) - (not realm filtered)", search, username, email, firstResult, maxResults);
@@ -112,7 +131,7 @@ public class UserRepository {
             return null;
         }
         try {
-            // Assuming UserEntity ID is Long, convert String ID to Long
+            // Assuming UserEntity ID is Long, attempt to convert String ID to Long
             Long userIdLong = Long.valueOf(id);
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
@@ -120,10 +139,12 @@ public class UserRepository {
             cq.where(cb.equal(root.get("id"), userIdLong));
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
-            log.debug("User not found with ID: {}", id);
+            log.debug("User not found with Long ID: {}", id);
             return null;
         } catch (NumberFormatException e) {
-            log.warn("Invalid user ID format: {}", id, e);
+            // The provided ID is not a valid Long. This is expected if Keycloak passes a UUID.
+            log.debug("User ID {} is not a valid Long format.", id);
+            // Return null. The provider will then attempt findByKeycloakId.
             return null;
         }
     }
@@ -165,25 +186,27 @@ public class UserRepository {
     }
 
 
-    public void save(UserEntity user) {
+    // Updated save function to return UserEntity
+    public UserEntity save(UserEntity user) {
         log.debug("UserRepository.save({})", user != null ? user.getUsername() : "null");
         EntityTransaction tx = em.getTransaction();
+        UserEntity savedUser = null; // Variable to hold the saved/merged entity
         try {
             tx.begin();
-            if (user.getId() == null) { // Assuming ID is auto-generated for new entities
+            if (user.getId() == null) {
                 em.persist(user);
-            } else { // For existing entities, check if managed before merging
-                if (em.contains(user)) {
-                    em.merge(user);
-                } else {
-                    em.merge(user);
-                }
+                // After persist and before commit, the user object is managed and ID is usually generated
+                savedUser = user;
+            } else {
+                savedUser = em.merge(user); // merge returns the managed instance
             }
             tx.commit();
+            log.debug("Successfully saved user {}", savedUser != null ? savedUser.getUsername() : "null");
+            return savedUser; // Return the managed/persisted entity
         } catch (Exception e) {
             if (tx.isActive()) tx.rollback();
             log.error("Failed to save user {}: {}", user != null ? user.getUsername() : "null", e.getMessage(), e);
-            throw e;
+            throw e; // Re-throw the exception
         }
     }
 
@@ -208,25 +231,25 @@ public class UserRepository {
             log.warn("Attempted to delete user with empty ID.");
             return;
         }
-        try {
-            Long userIdLong = Long.valueOf(userId);
-            UserEntity user = em.find(UserEntity.class, userIdLong);
-            if (user != null) {
-                // Note: Ensure cascading deletes are configured for UserProfile, user_roles, user_groups
-                // or handle them explicitly here before removing the user entity.
-                delete(user); // Delegate to delete(UserEntity)
-            } else {
-                log.warn("User not found for deletion with ID: {}", userId);
-            }
-        } catch (NumberFormatException e) {
-            log.warn("Invalid user ID format for deletion: {}", userId, e);
-        } catch (Exception e) {
-            log.error("Failed to delete user with ID {}: {}", userId, e.getMessage(), e);
-            throw e; // Re-throw exception after logging
+        // Attempt to find by Long ID first
+        UserEntity user = getById(userId); // getById handles NumberFormatException
+
+        // If not found by Long ID, attempt to find by Keycloak ID (UUID)
+        if (user == null) {
+            user = findByKeycloakId(userId);
+        }
+
+        if (user != null) {
+            // Note: Ensure cascading deletes are configured for UserProfile, user_roles, user_groups
+            // or handle them explicitly here or in delete(UserEntity) before removing the user entity.
+            delete(user); // Delegate to delete(UserEntity)
+            log.info("Successfully deleted user: {}", userId);
+        } else {
+            log.warn("User not found for deletion with ID (Long or Keycloak): {}", userId);
         }
     }
 
-    // Implemented based on CustomUserStorageProvider needs
+
     public List<UserEntity> findUsersByGroupId(String realmId, String groupId, Integer firstResult, Integer maxResults) {
         log.debug("UserRepository.findUsersByGroupId(realmId={}, groupId={}, first={}, max={})", realmId, groupId, firstResult, maxResults);
         if (realmId == null || realmId.trim().isEmpty() || groupId == null || groupId.trim().isEmpty()) {
@@ -270,7 +293,7 @@ public class UserRepository {
         return query.getResultList();
     }
 
-    // Implemented based on CustomUserStorageProvider needs
+
     public List<UserEntity> findUsersByAttribute(String realmId, String attrName, String attrValue) {
         log.debug("UserRepository.findUsersByAttribute(realmId={}, attrName={}, attrValue={})", realmId, attrName, attrValue);
         if (realmId == null || realmId.trim().isEmpty() || attrName == null || attrName.trim().isEmpty() || attrValue == null || attrValue.trim().isEmpty()) {
@@ -336,7 +359,7 @@ public class UserRepository {
         return em.createQuery(cq).getResultList();
     }
 
-    // Implemented based on CustomUserStorageProvider needs
+
     public void deleteAllUsersByRealm(String realmId) {
         log.debug("UserRepository.deleteAllUsersByRealm(realmId={})", realmId);
         if (realmId == null || realmId.trim().isEmpty()) {
@@ -349,9 +372,9 @@ public class UserRepository {
             // Note: This assumes cascade deletes are configured for UserProfile, user_roles, user_groups.
             // If not, you need to delete from join tables and UserProfile first explicitly.
             // Example explicit deletions (assuming join table names and column names):
-            // em.createQuery("DELETE FROM users_roles ur WHERE ur.users_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            // em.createNativeQuery("DELETE FROM users_roles ur WHERE ur.users_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
             //    .setParameter("realmId", realmId).executeUpdate();
-            // em.createQuery("DELETE FROM users_groups ug WHERE ug.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            // em.createNativeQuery("DELETE FROM users_groups ug WHERE ug.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
             //    .setParameter("realmId", realmId).executeUpdate();
             // em.createQuery("DELETE FROM user_profiles up WHERE up.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
             //    .setParameter("realmId", realmId).executeUpdate();

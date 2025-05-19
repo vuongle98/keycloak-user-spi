@@ -27,11 +27,19 @@ public class Group implements Serializable {
 
     private String name;
 
+    private String description;
+
     @Column(name = "parent_id")
     private Long parentId;
 
     @Column(name = "parent_path")
     private String parentPath;
+
+    @Column(name = "keycloak_id", unique = true)
+    private String keycloakId;
+
+    @Column(name = "realm_id", nullable = false)
+    private String realmId;
 
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(name = "groups_roles", joinColumns = @JoinColumn(name = "groups_id"), inverseJoinColumns = @JoinColumn(name = "roles_id"))

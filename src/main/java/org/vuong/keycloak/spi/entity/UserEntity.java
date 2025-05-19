@@ -36,6 +36,9 @@ public class UserEntity implements Serializable {
     @Column(name = "is_verified_email")
     private Boolean isVerifiedEmail = false;
 
+    @Column(name = "keycloak_id", unique = true)
+    private String keycloakId;
+
     @OneToOne(cascade = CascadeType.ALL, fetch = FetchType.EAGER)
     private UserProfile profile;
 

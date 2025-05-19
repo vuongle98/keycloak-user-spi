@@ -15,6 +15,8 @@ repositories {
 }
 
 dependencies {
+    compileOnly 'org.keycloak:keycloak-core:24.0.1'
+    compileOnly "org.keycloak:keycloak-model-jpa:24.0.1"
     compileOnly 'org.keycloak:keycloak-adapter-core:24.0.1'
     compileOnly 'org.keycloak:keycloak-server-spi:24.0.1'
     compileOnly 'org.keycloak:keycloak-server-spi-private:24.0.1'

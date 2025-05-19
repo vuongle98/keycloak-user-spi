@@ -5,45 +5,47 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.provider.ProviderConfigurationBuilder;
-import org.keycloak.storage.group.GroupStorageProviderFactory;
+import org.keycloak.storage.role.RoleStorageProviderFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.config.JpaProvider; // Assuming JpaProvider is used for EntityManager
-import org.vuong.keycloak.spi.repository.GroupRepository;
 import org.vuong.keycloak.spi.repository.RoleRepository;
 
 import java.util.ArrayList;
 import java.util.List;
 
-public class CustomGroupStorageProviderFactory implements
-        GroupStorageProviderFactory<CustomGroupStorageProvider> {
+// Factory for the Role Storage Provider
+public class CustomRoleStorageProviderFactory implements
+        RoleStorageProviderFactory<CustomRoleStorageProvider> {
 
-    private static final Logger log = LoggerFactory.getLogger(CustomGroupStorageProviderFactory.class);
+    private static final Logger log = LoggerFactory.getLogger(CustomRoleStorageProviderFactory.class);
 
     // Correct way to define an empty list of configuration properties
     private static final List<ProviderConfigProperty> configMetadata = ProviderConfigurationBuilder.create().build();
 
 
     @Override
-    public CustomGroupStorageProvider create(KeycloakSession session, ComponentModel model) {
-        log.info("CustomGroupStorageProviderFactory.create()");
-        EntityManager em = JpaProvider.getSession();
+    public CustomRoleStorageProvider create(KeycloakSession session, ComponentModel model) {
+        log.info("CustomRoleStorageProviderFactory.create()");
+        // Obtain EntityManager - reuse your JpaProvider utility
+        EntityManager em = JpaProvider.getSession(); // Assuming getSession returns EntityManager or Session that can be adapted
 
-        GroupRepository groupRepository = new GroupRepository(em);
+        // Instantiate only the repository needed by the Role provider
         RoleRepository roleRepository = new RoleRepository(em);
 
-        return new CustomGroupStorageProvider(session, model, groupRepository, roleRepository);
+        // Pass repository to the provider
+        return new CustomRoleStorageProvider(session, model, roleRepository);
     }
 
     @Override
     public String getId() {
-        log.info("CustomGroupStorageProviderFactory.getId()");
-        return "group-jpa-provider";
+        log.info("CustomRoleStorageProviderFactory.getId()");
+        return "role-jpa-provider"; // Unique ID for this provider type
     }
 
     @Override
     public String getHelpText() {
-        return "JPA Group Storage Provider";
+        return "JPA Role Storage Provider";
     }
 
     @Override // Uncommented and returning the empty list
