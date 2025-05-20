@@ -35,6 +35,10 @@ public class UserRepository {
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
             Root<UserEntity> root = cq.from(UserEntity.class);
+            // Eagerly fetch the 'groups' and 'roles' collections to avoid LazyInitializationException
+            root.fetch("groups", JoinType.LEFT);
+            root.fetch("roles", JoinType.LEFT);
+            cq.select(root).distinct(true); // Use distinct to avoid duplicate results if a user has multiple groups/roles
             cq.where(cb.equal(root.get("username"), username));
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
@@ -54,6 +58,10 @@ public class UserRepository {
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
             Root<UserEntity> root = cq.from(UserEntity.class);
+            // Eagerly fetch the 'groups' and 'roles' collections to avoid LazyInitializationException
+            root.fetch("groups", JoinType.LEFT);
+            root.fetch("roles", JoinType.LEFT);
+            cq.select(root).distinct(true);
             cq.where(cb.equal(root.get("email"), email));
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
@@ -72,6 +80,10 @@ public class UserRepository {
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
             Root<UserEntity> root = cq.from(UserEntity.class);
+            // Eagerly fetch the 'groups' and 'roles' collections to avoid LazyInitializationException
+            root.fetch("groups", JoinType.LEFT);
+            root.fetch("roles", JoinType.LEFT);
+            cq.select(root).distinct(true);
             cq.where(cb.equal(root.get("keycloakId"), keycloakId));
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
@@ -136,6 +148,10 @@ public class UserRepository {
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
             Root<UserEntity> root = cq.from(UserEntity.class);
+            // Eagerly fetch the 'groups' and 'roles' collections to avoid LazyInitializationException
+            root.fetch("groups", JoinType.LEFT);
+            root.fetch("roles", JoinType.LEFT);
+            cq.select(root).distinct(true);
             cq.where(cb.equal(root.get("id"), userIdLong));
             return em.createQuery(cq).getSingleResult();
         } catch (NoResultException e) {
@@ -249,10 +265,30 @@ public class UserRepository {
         }
     }
 
+    /**
+     * Deletes a user by their Keycloak ID.
+     * @param keycloakId The Keycloak UUID of the user to delete.
+     */
+    public void deleteByKeycloakId(String keycloakId) {
+        log.debug("UserRepository.deleteByKeycloakId({})", keycloakId);
+        if (keycloakId == null || keycloakId.trim().isEmpty()) {
+            log.warn("Attempted to delete user with empty Keycloak ID.");
+            return;
+        }
+        UserEntity user = findByKeycloakId(keycloakId);
+        if (user != null) {
+            delete(user);
+            log.info("Successfully deleted user with Keycloak ID: {}", keycloakId);
+        } else {
+            log.warn("User not found for deletion with Keycloak ID: {}", keycloakId);
+        }
+    }
+
 
     public List<UserEntity> findUsersByGroupId(String realmId, String externalGroupId, Integer firstResult, Integer maxResults) {
-        log.debug("UserRepository.findUsersByGroupId(realmId={}, externalGroupId={})", realmId, externalGroupId);
+        log.debug("findUsersByGroupId: realmId={}, externalGroupId={}, firstResult={}, maxResults={}", realmId, externalGroupId, firstResult, maxResults);
         if (realmId == null || externalGroupId == null || externalGroupId.trim().isEmpty()) {
+            log.warn("findUsersByGroupId: Invalid parameters received: realmId={}, externalGroupId={}", realmId, externalGroupId);
             return new ArrayList<>();
         }
 
@@ -262,35 +298,47 @@ public class UserRepository {
             CriteriaBuilder cb = em.getCriteriaBuilder();
             CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
             Root<UserEntity> root = cq.from(UserEntity.class);
-            Join<UserEntity, Group> groupsJoin = root.join("groups"); // Assuming UserEntity has a 'groups' collection mapped to Group
+
+            // Use INNER JOIN to ensure we only get users actually linked to this group
+            Join<UserEntity, Group> groupsJoin = root.join("groups", JoinType.INNER);
+
+            // Eagerly fetch the 'roles' collection for the returned UserEntities
+            root.fetch("groups", JoinType.LEFT);
+            root.fetch("roles", JoinType.LEFT);
 
             List<Predicate> predicates = new ArrayList<>();
-            predicates.add(cb.equal(root.get("realmId"), realmId)); // Filter by realm
-            predicates.add(cb.equal(groupsJoin.get("id"), groupIdLong)); // Filter by the external group ID
+            predicates.add(cb.equal(groupsJoin.get("realmId"), realmId)); // Filter by realm
+            predicates.add(cb.equal(groupsJoin.get("id"), groupIdLong)); // Filter by the external group ID via the join
 
             cq.where(cb.and(predicates.toArray(new Predicate[0])));
-            cq.distinct(true); // Avoid duplicate users if a user is linked multiple ways or query logic causes it
+            cq.select(root).distinct(true); // Select the root entity and ensure distinct results
 
             TypedQuery<UserEntity> query = em.createQuery(cq);
+
+            // Log the query parameters before execution
+            log.debug("findUsersByGroupId: Executing query with parameters - realmId: {}, groupId: {}, firstResult: {}, maxResults: {}",
+                    realmId, groupIdLong, firstResult, maxResults);
+
             if (firstResult != null) {
                 query.setFirstResult(firstResult);
             }
             if (maxResults != null) {
                 query.setMaxResults(maxResults);
             }
-            return query.getResultList();
+            List<UserEntity> resultList = query.getResultList();
+            log.debug("findUsersByGroupId: Query returned {} users for group ID {} in realm {}.", resultList.size(), externalGroupId, realmId);
+            return resultList;
         } catch (NumberFormatException e) {
-            log.error("Invalid externalGroupId format provided to findUsersByGroupId: {}", externalGroupId, e);
+            log.error("findUsersByGroupId: Invalid externalGroupId format provided: {}", externalGroupId, e);
             return new ArrayList<>();
         } catch (NoResultException e) {
-            log.debug("No users found for group ID {} in realm {}", externalGroupId, realmId);
+            log.debug("findUsersByGroupId: No users found for group ID {} in realm {}", externalGroupId, realmId);
             return new ArrayList<>();
         } catch (Exception e) {
-            log.error("Error fetching users by group ID {}: {}", externalGroupId, e.getMessage(), e);
+            log.error("findUsersByGroupId: Error fetching users by group ID {}: {}", externalGroupId, e.getMessage(), e);
             throw e; // Re-throw to make the issue visible higher up
         }
     }
-
 
     public List<UserEntity> findUsersByAttribute(String realmId, String attrName, String attrValue) {
         log.debug("UserRepository.findUsersByAttribute(realmId={}, attrName={}, attrValue={})", realmId, attrName, attrValue);
@@ -374,7 +422,7 @@ public class UserRepository {
             //    .setParameter("realmId", realmId).executeUpdate();
             // em.createNativeQuery("DELETE FROM users_groups ug WHERE ug.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
             //    .setParameter("realmId", realmId).executeUpdate();
-            // em.createQuery("DELETE FROM user_profiles up WHERE up.user_id IN (SELECT u.id FROM users u WHERE u.realmId = :realmId)")
+            // em.createQuery("DELETE FROM user_profiles up WHERE up.user.realmId = :realmId") // Corrected path for UserProfile
             //    .setParameter("realmId", realmId).executeUpdate();
 
             // Delete users by realmId (relies on configured cascades or prior explicit deletes)

@@ -9,6 +9,7 @@ import lombok.Setter;
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.Objects; // Import Objects for equals/hashCode
 import java.util.Set;
 
 @Getter
@@ -56,4 +57,20 @@ public class Group implements Serializable {
 
     @Column(name = "updated_at")
     private Instant updatedAt;
+
+    // Fix for "cannot view users in group details" - crucial for Set operations
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Group group = (Group) o;
+        // Equality based on the primary key 'id'
+        return Objects.equals(id, group.id);
+    }
+
+    @Override
+    public int hashCode() {
+        // Hash code based on the primary key 'id'
+        return Objects.hash(id);
+    }
 }

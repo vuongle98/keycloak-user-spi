@@ -21,6 +21,9 @@ public class UserProfile implements Serializable {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+//    @OneToOne(cascade = CascadeType.ALL, fetch = FetchType.EAGER)
+//    private UserEntity user;
+
     @Column(name = "first_name")
     private String firstName;
 

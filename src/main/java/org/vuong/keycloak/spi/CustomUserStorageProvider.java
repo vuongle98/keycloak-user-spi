@@ -10,19 +10,24 @@ import org.keycloak.storage.StorageId;
 import org.keycloak.storage.UserStorageProvider;
 import org.keycloak.storage.federated.UserFederatedStorageProvider;
 import org.keycloak.storage.federated.UserGroupMembershipFederatedStorage;
+import org.keycloak.storage.role.RoleStorageProvider;
+import org.keycloak.storage.role.RoleStorageProviderFactory;
 import org.keycloak.storage.user.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.vuong.keycloak.spi.adapter.RoleAdapter;
 import org.vuong.keycloak.spi.adapter.UserAdapter;
 import org.vuong.keycloak.spi.entity.Group;
 import org.vuong.keycloak.spi.entity.Role;
 import org.vuong.keycloak.spi.entity.UserEntity;
 import org.vuong.keycloak.spi.repository.GroupRepository;
 import org.vuong.keycloak.spi.repository.RoleRepository;
+import org.vuong.keycloak.spi.repository.UserProfileRepository;
 import org.vuong.keycloak.spi.repository.UserRepository;
 import org.vuong.keycloak.spi.util.PasswordUtil;
 
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class CustomUserStorageProvider implements
@@ -31,7 +36,9 @@ public class CustomUserStorageProvider implements
         UserQueryProvider,
         UserRegistrationProvider,
         CredentialInputValidator,
-        UserBulkUpdateProvider
+        UserBulkUpdateProvider,
+        RoleStorageProvider,
+        RoleStorageProviderFactory
 {
 
     private static final Logger logger = LoggerFactory.getLogger(CustomUserStorageProvider.class);
@@ -41,15 +48,27 @@ public class CustomUserStorageProvider implements
     private final UserRepository userRepository;
     private final RoleRepository roleRepository; // Needed for user-centric and provider role methods
     private final GroupRepository groupRepository; // Needed for user-centric and provider group methods
+    private final UserProfileRepository profileRepository; // Needed for user-centric and provider group methods
 
 
     // Constructor now accepts all repositories
-    public CustomUserStorageProvider(KeycloakSession session, ComponentModel model, UserRepository userRepository, RoleRepository roleRepository, GroupRepository groupRepository) {
+    public CustomUserStorageProvider(KeycloakSession session, ComponentModel model, UserRepository userRepository, RoleRepository roleRepository, GroupRepository groupRepository, UserProfileRepository profileRepository) {
         this.session = session;
         this.model = model;
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.groupRepository = groupRepository;
+        this.profileRepository = profileRepository;
+    }
+
+    @Override
+    public RoleStorageProvider create(KeycloakSession session, ComponentModel model) {
+        return null;
+    }
+
+    @Override
+    public String getId() {
+        return "";
     }
 
     @Override
@@ -125,22 +144,25 @@ public class CustomUserStorageProvider implements
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group, Integer firstResult, Integer maxResults) {
         String keycloakGroupId = group.getId(); // This is Keycloak's ID for the group
-        logger.info("Fetching members for group: realm={}, keycloakGroupId={}", realm.getId(), keycloakGroupId);
+        logger.info("getGroupMembersStream: Fetching members for group: realm={}, keycloakGroupId={}", realm.getId(), keycloakGroupId);
 
         // This call is crucial: it should resolve keycloakGroupId to your internal Group entity
         Group groupEntity = groupRepository.getById(keycloakGroupId); // getById handles both external Long and Keycloak UUID
 
         if (groupEntity == null) {
-            logger.warn("Group entity not found for Keycloak ID: {}. Cannot fetch members.", keycloakGroupId);
+            logger.warn("getGroupMembersStream: Group entity not found for Keycloak ID: {}. Cannot fetch members.", keycloakGroupId);
             return Stream.empty(); // Return empty stream if group not found
         }
 
         // Assuming groupEntity.getId() is the external Long ID you use in your DB for user-group mapping
         String externalGroupId = String.valueOf(groupEntity.getId());
-        logger.info("Resolved group Keycloak ID {} to external ID {}. Fetching users for this group.", keycloakGroupId, externalGroupId);
+        logger.info("getGroupMembersStream: Resolved group Keycloak ID {} to external ID {}. Fetching users for this group.", keycloakGroupId, externalGroupId);
+
+        List<UserEntity> usersInGroup = userRepository.findUsersByGroupId(realm.getId(), externalGroupId, firstResult, maxResults);
+        logger.info("getGroupMembersStream: Found {} users for group {} (external ID {}).", usersInGroup.size(), group.getName(), externalGroupId);
 
         // Call UserRepository with the external ID of your group
-        return userRepository.findUsersByGroupId(realm.getId(), externalGroupId, firstResult, maxResults)
+        return usersInGroup
                 .stream()
                 // Pass all necessary repositories to the UserAdapter constructor
                 .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository)); // <--- IMPORTANT: ensure userRepository is passed here
@@ -172,7 +194,7 @@ public class CustomUserStorageProvider implements
         UserEntity user = new UserEntity();
         user.setUsername(username);
         user.setLocked(false);
-        // user.setRealmId(realm.getId()); // Assuming UserEntity has a realmId field
+        user.setRealmId(realm.getId()); // FIX: Ensure realmId is set for new users
         // TODO: Handle UserProfile creation
 
         try {
@@ -309,11 +331,84 @@ public class CustomUserStorageProvider implements
             logger.info("Successfully removed user mappings for role {}", roleId);
         } catch (Exception e) {
             logger.error("Failed to remove user mappings for role {}: {}", roleId, e.getMessage(), e);
+            throw e;
         }
     }
 
     @Override
     public void grantToAllUsers(RealmModel realm, RoleModel role) {
 
+    }
+
+    // --- RoleStorageProvider implementation ---
+
+
+    @Override
+    public RoleModel getRealmRole(RealmModel realm, String name) {
+        logger.info("getRealmRole: Looking up realm role by name '{}' in realm '{}' (specific method)", name, realm.getId());
+        // This method is often a duplicate of getRoleByName for realm roles.
+        // Returning null as per your instruction.
+        return null;
+    }
+
+    @Override
+    public RoleModel getRoleById(RealmModel realm, String id) {
+        logger.info("getRoleById: Looking up role by ID '{}' in realm '{}'", id, realm.getId());
+        Role roleEntity = roleRepository.getById(id);
+        if (roleEntity != null) {
+            if (Objects.equals(roleEntity.getRealmId(), realm.getId()) && roleEntity.getClientId() == null) {
+                logger.info("getRoleById: Found realm role '{}' with ID '{}'", roleEntity.getName(), id);
+                return new RoleAdapter(session, realm, model, roleEntity, roleRepository);
+            } else {
+                logger.warn("getRoleById: Role found with ID '{}' but does not belong to realm '{}' or is a client role.", id, realm.getId());
+            }
+        } else {
+            logger.debug("getRoleById: No role found with ID '{}'", id);
+        }
+        return null;
+    }
+
+    // New method as per your request
+    @Override
+    public Stream<RoleModel> searchForRolesStream(RealmModel realm, String search, Integer first, Integer max) {
+        logger.info("searchForRolesStream: Searching for all roles in realm '{}' with search '{}', first={}, max={}", realm.getId(), search, first, max);
+        // This method should search both realm and client roles.
+        // For simplicity, returning empty as per your instruction.
+        return Stream.empty();
+    }
+
+    @Override
+    public RoleModel getClientRole(ClientModel client, String name) {
+        logger.info("getClientRole: Looking up client role by name '{}' for client '{}' in realm '{}' (specific method)", name, client.getClientId(), client.getRealm().getId());
+        // This method is often a duplicate of getClientRoleByName.
+        // Returning null as per your instruction.
+        return null;
+    }
+
+
+    @Override
+    public Stream<RoleModel> searchForClientRolesStream(ClientModel client, String search, Integer first, Integer max) {
+        logger.info("searchForClientRolesStream: Searching for client roles for client '{}' with search '{}', first={}, max={}", client.getClientId(), search, first, max);
+        return roleRepository.searchClientRoles(client.getRealm().getId(), client.getClientId(), search, first, max)
+                .stream()
+                .map(roleEntity -> new RoleAdapter(session, client.getRealm(), model, roleEntity, roleRepository));
+    }
+
+    // New method as per your request
+    @Override
+    public Stream<RoleModel> searchForClientRolesStream(RealmModel realm, Stream<String> ids, String search, Integer first, Integer max) {
+        List<String> roleIds = ids != null ? ids.collect(Collectors.toList()) : Collections.emptyList();
+        logger.info("searchForClientRolesStream (by Realm and IDs): Searching for client roles in realm '{}' with IDs {} and search '{}', first={}, max={}", realm.getId(), roleIds, search, first, max);
+        // Returning empty as per your instruction.
+        return Stream.empty();
+    }
+
+    // New method as per your request
+    @Override
+    public Stream<RoleModel> searchForClientRolesStream(RealmModel realm, String search, Stream<String> excludedIds, Integer first, Integer max) {
+        List<String> excludedRoleIds = excludedIds != null ? excludedIds.collect(Collectors.toList()) : Collections.emptyList();
+        logger.info("searchForClientRolesStream (by Realm and Excluded IDs): Searching for client roles in realm '{}' with search '{}' excluding IDs {}, first={}, max={}", realm.getId(), search, excludedRoleIds, first, max);
+        // Returning empty as per your instruction.
+        return Stream.empty();
     }
 }

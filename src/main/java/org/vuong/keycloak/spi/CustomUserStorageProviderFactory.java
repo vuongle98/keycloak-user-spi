@@ -20,6 +20,7 @@ import org.vuong.keycloak.spi.config.JpaProvider;
 import org.vuong.keycloak.spi.entity.UserEntity; // Keep if needed for imports/references
 import org.vuong.keycloak.spi.repository.GroupRepository; // Keep if needed for imports/references
 import org.vuong.keycloak.spi.repository.RoleRepository; // Keep if needed for imports/references
+import org.vuong.keycloak.spi.repository.UserProfileRepository;
 import org.vuong.keycloak.spi.repository.UserRepository;
 // Removed imports for GroupRepository and RoleRepository
 
@@ -53,9 +54,10 @@ public class CustomUserStorageProviderFactory implements
         UserRepository userRepository = new UserRepository(em);
         RoleRepository roleRepository = new RoleRepository(em); // Needed for user-role assignment methods
         GroupRepository groupRepository = new GroupRepository(em); // Needed for user-group assignment methods
+        UserProfileRepository profileRepository = new UserProfileRepository(em); // Needed for user-group assignment methods
 
         // Pass repositories to the provider
-        return new CustomUserStorageProvider(session, model, userRepository, roleRepository, groupRepository);
+        return new CustomUserStorageProvider(session, model, userRepository, roleRepository, groupRepository, profileRepository);
     }
 
     // The getPersistenceUnitInfo method is typically needed if the factory is responsible for creating the EntityManagerFactory/PersistenceUnit.

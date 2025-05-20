@@ -5,7 +5,7 @@ import jakarta.persistence.EntityTransaction;
 import jakarta.persistence.NoResultException;
 import jakarta.persistence.TypedQuery;
 import jakarta.persistence.criteria.*;
-import org.keycloak.models.GroupModel;
+import org.keycloak.models.GroupModel; // Import GroupModel
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.entity.Group;
@@ -701,135 +701,93 @@ public class GroupRepository {
         }
     }
 
-    // Implemented based on CustomUserStorageProvider needs (assignment removal)
-    public void deleteAllAssignmentsForClientRoles(String clientId) {
-        log.debug("GroupRepository.deleteAllAssignmentsForClientRoles(clientId={})", clientId);
-        if (clientId == null || clientId.trim().isEmpty()) {
-            log.warn("Attempted to delete client role assignments with empty clientId.");
-            return;
-        }
-        EntityTransaction tx = em.getTransaction();
-        try {
-            tx.begin();
-            // Delete entries from groups_roles where the role is a client role for the specified client
-            em.createNativeQuery("DELETE FROM groups_roles gr WHERE gr.roles_id IN (SELECT r.id FROM roles r WHERE r.clientId = :clientId)")
-                    .setParameter("clientId", clientId) // Assuming Role entity has clientId
-                    .executeUpdate();
-            tx.commit();
-        } catch (Exception e) {
-            if (tx.isActive()) tx.rollback();
-            log.error("Failed to delete all client role assignments for client {}: {}", clientId, e.getMessage(), e);
-            throw e;
-        }
-    }
-
     /**
-     * Finds a group by Keycloak ID or name. If not found, creates a new one.
-     * Then, ensures the group entity's properties (name, parentId, parentPath, realmId)
-     * are synchronized with the provided Keycloak GroupModel.
+     * Finds a group by Keycloak ID or by name/realm/parent. If not found, creates a new one.
+     * Then, ensures the group entity's properties are synchronized with the provided Keycloak GroupModel.
      *
-     * @param realmId The realm ID.
+     * @param realmId   The realm ID.
      * @param groupModel The Keycloak GroupModel to sync with.
      * @return The synchronized Group entity from your database.
      */
     public Group syncGroup(String realmId, GroupModel groupModel) {
-        log.debug("GroupRepository.syncGroup(realmId={}, groupModel.id={}, groupModel.name={})",
-                realmId, groupModel.getId(), groupModel.getName());
+        String keycloakGroupId = groupModel.getId();
+        String groupName = groupModel.getName();
+        String parentKeycloakId = groupModel.getParentId(); // Keycloak's parent ID (UUID or composite)
+        Long parentInternalId = null;
+
+        log.debug("GroupRepository.syncGroup(realmId={}, groupModel.id={}, groupModel.name={}, parentKeycloakId={})",
+                realmId, keycloakGroupId, groupName, parentKeycloakId);
+
+        // Resolve parent Keycloak ID to internal Long ID if present
+        if (parentKeycloakId != null && !parentKeycloakId.trim().isEmpty()) {
+            Group parentGroupEntity = getById(parentKeycloakId); // Use getById to resolve parent
+            if (parentGroupEntity != null) {
+                parentInternalId = parentGroupEntity.getId();
+                log.debug("Resolved parent Keycloak ID {} to internal ID {}", parentKeycloakId, parentInternalId);
+            } else {
+                log.warn("Parent group entity not found for Keycloak ID: {}. Cannot set parent for group {}.", parentKeycloakId, groupName);
+                // Decide how to handle this: proceed without parent, or throw an exception.
+                // For now, we proceed with parentInternalId = null, meaning it will be treated as a top-level group.
+            }
+        }
 
         Group groupEntity = null;
 
         // 1. Try to find by Keycloak ID first (most reliable link)
-        if (groupModel.getId() != null) {
-            groupEntity = findByKeycloakId(groupModel.getId());
+        if (keycloakGroupId != null && isUUID(keycloakGroupId)) { // Only try if it looks like a UUID
+            groupEntity = findByKeycloakId(keycloakGroupId);
+            if (groupEntity != null) {
+                log.debug("Found group by Keycloak ID: {}", keycloakGroupId);
+            }
         }
 
-        // 2. If not found by Keycloak ID, try to find by name and parent for existing groups
-        // This is important for groups that might have been created before Keycloak assigned a keycloakId,
-        // or for top-level groups where Keycloak might not provide a parent ID explicitly on creation.
+        // 2. If not found by Keycloak ID, try to find by name, realm, and parent ID
         if (groupEntity == null) {
-            // Determine parentId for lookup. Keycloak GroupModel's parent can be null for top-level.
-            String parentKeycloakId = null;
-            GroupModel parentModel = groupModel.getParent();
-            if (parentModel != null) {
-                parentKeycloakId = parentModel.getId(); // This would be the Keycloak UUID of the parent
-            }
-
-            // Attempt to find by name and parent. This might require resolving the parent's external ID.
-            Long parentExternalId = null;
-            if (parentKeycloakId != null) {
-                Group parentEntity = findByKeycloakId(parentKeycloakId);
-                if (parentEntity != null) {
-                    parentExternalId = parentEntity.getId();
-                } else {
-                    log.warn("Parent group with Keycloak ID {} not found in database for group {}. Cannot lookup by name and parent.",
-                            parentKeycloakId, groupModel.getName());
-                    // If parent doesn't exist, we can't find by name and parent. Proceed to creation.
-                }
-            }
-
-            if (parentExternalId == null) { // Top-level group lookup
-                groupEntity = findGroupByNameAndParent(realmId, groupModel.getName(), null);
-            } else { // Subgroup lookup
-                groupEntity = findGroupByNameAndParent(realmId, groupModel.getName(), String.valueOf(parentExternalId));
+            groupEntity = findGroupByNameAndParent(realmId, groupName, parentInternalId != null ? String.valueOf(parentInternalId) : null);
+            if (groupEntity != null) {
+                log.debug("Found group by name '{}' and parent ID '{}' in realm '{}'", groupName, parentInternalId, realmId);
             }
         }
-
 
         // 3. If still not found, create a new group entity
         if (groupEntity == null) {
             log.info("Group '{}' (Keycloak ID: {}) not found in database. Creating new group.",
-                    groupModel.getName(), groupModel.getId());
+                    groupName, keycloakGroupId);
             groupEntity = new Group();
             groupEntity.setCreatedAt(Instant.now());
-            groupEntity.setCreatedBy("keycloak-sync"); // Or a more specific user if available
+            groupEntity.setCreatedBy("keycloak-sync"); // Or a more specific user
         } else {
             log.info("Group '{}' (ID: {}, Keycloak ID: {}) found. Synchronizing properties.",
                     groupEntity.getName(), groupEntity.getId(), groupEntity.getKeycloakId());
         }
 
         // 4. Synchronize properties from Keycloak GroupModel to your Group entity
-        groupEntity.setName(groupModel.getName());
-        groupEntity.setRealmId(realmId); // Always ensure realmId is set
+        groupEntity.setName(groupName);
+//        groupEntity.setDescription(groupModel.getDescription());
+        groupEntity.setRealmId(realmId);
+        groupEntity.setParentId(parentInternalId);
 
-        // Set Keycloak ID if not already set or if it needs updating (should be unique)
-        if (groupEntity.getKeycloakId() == null || !groupEntity.getKeycloakId().equals(groupModel.getId())) {
-            // Only set if groupModel.getId() is a valid UUID, otherwise it might be a composite ID from storage
-            if (isUUID(groupModel.getId())) { // Use your isUUID helper
-                groupEntity.setKeycloakId(groupModel.getId());
+        // Set Keycloak ID if not already set or if it needs updating
+        if (groupEntity.getKeycloakId() == null || !groupEntity.getKeycloakId().equals(keycloakGroupId)) {
+            if (keycloakGroupId != null && isUUID(keycloakGroupId)) { // Only set if groupModel.getId() is a valid UUID
+                groupEntity.setKeycloakId(keycloakGroupId);
             } else {
-                // If Keycloak ID from GroupModel is a composite ID (e.g., 'f:provider_id:external_id'),
-                // then the actual Keycloak ID in our 'keycloakId' column should be the raw UUID Keycloak assigns.
-                // This scenario is tricky because GroupModel.getId() might be the composite ID.
-                // For now, if it's not a UUID, we won't overwrite a pre-existing UUID,
-                // but if it's null, we might try to infer or leave it for later.
-                log.debug("GroupModel ID '{}' is not a raw UUID. Not updating keycloakId field directly.", groupModel.getId());
+                log.debug("GroupModel ID '{}' is not a raw UUID or is null. Not updating keycloakId field directly.", keycloakGroupId);
             }
-        }
-
-
-        // Handle parent relationship
-        GroupModel parentKcGroup = groupModel.getParent();
-        if (parentKcGroup != null) {
-            // Recursively sync the parent group if it exists in Keycloak
-            Group parentDbGroup = syncGroup(realmId, parentKcGroup); // Ensure parent exists and is synced
-            groupEntity.setParentId(parentDbGroup.getId());
-            // Parent path might also be updated if needed. Keycloak uses '/path/to/group'.
-            // You can construct this from parentDbGroup.getParentPath() + "/" + parentDbGroup.getName()
-            String parentPath = parentDbGroup.getParentPath();
-            if (parentPath == null || parentPath.isEmpty()) {
-                parentPath = "/" + parentDbGroup.getName();
-            } else {
-                parentPath = parentPath + "/" + parentDbGroup.getName();
-            }
-            groupEntity.setParentPath(parentPath);
-        } else {
-            // Top-level group
-            groupEntity.setParentId(null);
-            groupEntity.setParentPath(null); // Or "/" depending on your path convention
         }
 
         groupEntity.setUpdatedAt(Instant.now());
-        groupEntity.setUpdatedBy("keycloak-sync"); // Or a more specific user
+        groupEntity.setUpdatedBy("keycloak-sync");
+
+        // TODO: Handle attributes (code) if they are passed in groupModel.getAttributes()
+        // For example:
+        // List<String> codeAttr = groupModel.getAttribute("code");
+        // if (codeAttr != null && !codeAttr.isEmpty()) {
+        //     groupEntity.setCode(codeAttr.get(0));
+        // } else {
+        //     groupEntity.setCode(null);
+        // }
+
 
         // 5. Save the synchronized group entity
         return save(groupEntity); // Use your existing save method for persistence
