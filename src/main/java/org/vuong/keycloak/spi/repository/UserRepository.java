@@ -250,47 +250,45 @@ public class UserRepository {
     }
 
 
-    public List<UserEntity> findUsersByGroupId(String realmId, String groupId, Integer firstResult, Integer maxResults) {
-        log.debug("UserRepository.findUsersByGroupId(realmId={}, groupId={}, first={}, max={})", realmId, groupId, firstResult, maxResults);
-        if (realmId == null || realmId.trim().isEmpty() || groupId == null || groupId.trim().isEmpty()) {
+    public List<UserEntity> findUsersByGroupId(String realmId, String externalGroupId, Integer firstResult, Integer maxResults) {
+        log.debug("UserRepository.findUsersByGroupId(realmId={}, externalGroupId={})", realmId, externalGroupId);
+        if (realmId == null || externalGroupId == null || externalGroupId.trim().isEmpty()) {
             return new ArrayList<>();
         }
-        Long groupIdLong;
+
         try {
-            groupIdLong = Long.valueOf(groupId);
+            Long groupIdLong = Long.valueOf(externalGroupId); // Ensure it's a Long
+
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            Join<UserEntity, Group> groupsJoin = root.join("groups"); // Assuming UserEntity has a 'groups' collection mapped to Group
+
+            List<Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.equal(root.get("realmId"), realmId)); // Filter by realm
+            predicates.add(cb.equal(groupsJoin.get("id"), groupIdLong)); // Filter by the external group ID
+
+            cq.where(cb.and(predicates.toArray(new Predicate[0])));
+            cq.distinct(true); // Avoid duplicate users if a user is linked multiple ways or query logic causes it
+
+            TypedQuery<UserEntity> query = em.createQuery(cq);
+            if (firstResult != null) {
+                query.setFirstResult(firstResult);
+            }
+            if (maxResults != null) {
+                query.setMaxResults(maxResults);
+            }
+            return query.getResultList();
         } catch (NumberFormatException e) {
-            log.warn("Invalid group ID format for findUsersByGroupId: {}", groupId, e);
+            log.error("Invalid externalGroupId format provided to findUsersByGroupId: {}", externalGroupId, e);
             return new ArrayList<>();
+        } catch (NoResultException e) {
+            log.debug("No users found for group ID {} in realm {}", externalGroupId, realmId);
+            return new ArrayList<>();
+        } catch (Exception e) {
+            log.error("Error fetching users by group ID {}: {}", externalGroupId, e.getMessage(), e);
+            throw e; // Re-throw to make the issue visible higher up
         }
-
-        CriteriaBuilder cb = em.getCriteriaBuilder();
-        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
-        Root<UserEntity> root = cq.from(UserEntity.class);
-        Join<UserEntity, Group> groupsJoin = root.join("groups"); // Join the many-to-many groups relationship
-
-        List<Predicate> predicates = new ArrayList<>();
-
-        // Filter by realm (assuming UserEntity has realmId)
-        predicates.add(cb.equal(root.get("realmId"), realmId));
-        // Filter by group ID in the joined table
-        predicates.add(cb.equal(groupsJoin.get("id"), groupIdLong));
-
-        cq.where(cb.and(predicates.toArray(new Predicate[0])));
-        // Add distinct to avoid duplicate users if a user is in the same group multiple times (unlikely but good practice)
-        cq.distinct(true);
-        // Optional: Add ordering, e.g., cq.orderBy(cb.asc(root.get("username")));
-
-
-        TypedQuery<UserEntity> query = em.createQuery(cq);
-
-        if (firstResult != null) {
-            query.setFirstResult(firstResult);
-        }
-        if (maxResults != null) {
-            query.setMaxResults(maxResults);
-        }
-
-        return query.getResultList();
     }
 
 

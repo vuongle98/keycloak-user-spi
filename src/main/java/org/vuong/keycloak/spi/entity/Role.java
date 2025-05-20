@@ -32,6 +32,15 @@ public class Role implements Serializable {
     @Column(name = "description")
     private String description;
 
+    @Column(name = "keycloak_id", unique = true)
+    private String keycloakId;
+
+    @Column(name = "realm_id")
+    private String realmId;
+
+    @Column(name = "client_id") // Null for realm roles, populated for client roles
+    private String clientId;
+
     @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(name = "roles_permissions", joinColumns = @JoinColumn(name = "roles_id"), inverseJoinColumns = @JoinColumn(name = "permissions_id"))
     private Set<Permission> permissions = new HashSet<>();

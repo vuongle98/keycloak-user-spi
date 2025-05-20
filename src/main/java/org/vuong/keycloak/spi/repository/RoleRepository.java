@@ -5,20 +5,28 @@ import jakarta.persistence.EntityTransaction;
 import jakarta.persistence.NoResultException;
 import jakarta.persistence.TypedQuery;
 import jakarta.persistence.criteria.*;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.RoleContainerModel;
+import org.keycloak.models.RoleModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.entity.Role;
 import org.vuong.keycloak.spi.entity.UserEntity; // Keep if relationships are traversed here
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set; // Import Set
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class RoleRepository {
 
     private static final Logger log = LoggerFactory.getLogger(RoleRepository.class);
+
+    private static final Pattern UUID_PATTERN = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+
     private final EntityManager em;
 
     public RoleRepository(EntityManager em) {
@@ -383,21 +391,18 @@ public class RoleRepository {
     }
 
 
-    public void save(Role role) {
+    public Role save(Role role) {
         log.debug("RoleRepository.save({})", role != null ? role.getName() : "null");
         EntityTransaction tx = em.getTransaction();
         try {
             tx.begin();
-            if (role.getId() == null) { // Assuming ID is auto-generated for new entities
+            if (role.getId() == null) {
                 em.persist(role);
-            } else { // For existing entities, check if managed before merging
-                if (em.contains(role)) {
-                    em.merge(role);
-                } else {
-                    em.merge(role);
-                }
+            } else {
+                role = em.merge(role);
             }
             tx.commit();
+            return role; // Return the managed or merged entity
         } catch (Exception e) {
             if (tx.isActive()) tx.rollback();
             log.error("Failed to save role {}: {}", role != null ? role.getName() : "null", e.getMessage(), e);
@@ -465,10 +470,188 @@ public class RoleRepository {
         }
     }
 
-    // Methods for managing role assignments on users/groups would typically be here or in dedicated repositories.
-    // Example placeholder signatures (implementation would involve join tables users_roles, groups_roles):
-    // public void removeUserMappingsForRole(String roleId) { ... }
-    // public void removeGroupMappingsForRole(String roleId) { ... }
-    // public void deleteAllAssignmentsForRealmRoles(String realmId) { ... }
-    // public void deleteAllAssignmentsForClientRoles(String clientId) { ... }
+    private boolean isUUID(String id) {
+        if (id == null || id.length() != 36) { // Standard UUID length with hyphens
+            return false;
+        }
+        return UUID_PATTERN.matcher(id).matches();
+    }
+
+    public Role findByKeycloakId(String keycloakId) {
+        log.debug("RoleRepository.findByKeycloakId({})", keycloakId);
+        if (keycloakId == null || keycloakId.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<Role> cq = cb.createQuery(Role.class);
+            Root<Role> root = cq.from(Role.class);
+            cq.where(cb.equal(root.get("keycloakId"), keycloakId));
+            return em.createQuery(cq).getSingleResult();
+        } catch (NoResultException e) {
+            log.debug("Role not found with keycloakId: {}", keycloakId);
+            return null;
+        }
+    }
+
+    /**
+     * Finds a role by Keycloak ID or name/realm/client. If not found, creates a new one.
+     * Then, ensures the role entity's properties are synchronized with the provided Keycloak RoleModel.
+     *
+     * @param realmId   The realm ID.
+     * @param roleModel The Keycloak RoleModel to sync with.
+     * @return The synchronized Role entity from your database.
+     */
+    public Role syncRole(String realmId, RoleModel roleModel) {
+        String keycloakRoleId = roleModel.getId();
+        String roleName = roleModel.getName();
+        String clientId = null; // Will be null for realm roles, populated for client roles
+
+        // Determine if it's a client role and extract clientId if so
+        if (roleModel.isClientRole()) {
+            RoleContainerModel container = roleModel.getContainer();
+            if (container instanceof ClientModel) {
+                clientId = ((ClientModel) container).getId();
+                log.debug("RoleModel '{}' is a client role for client ID: {}", roleName, clientId);
+            } else {
+                log.warn("RoleModel '{}' is marked as a client role, but its container is not a ClientModel (it's {}). Cannot determine clientId.", roleName, container.getClass().getName());
+                // Handle this unexpected scenario, maybe return null or throw. For now, proceed with clientId = null
+            }
+        } else {
+            log.debug("RoleModel '{}' is a realm role.", roleName);
+        }
+
+        log.debug("RoleRepository.syncRole(realmId={}, roleModel.id={}, roleModel.name={}, derived clientId={})",
+                realmId, keycloakRoleId, roleName, clientId);
+
+        Role roleEntity = null;
+
+        // 1. Try to find by Keycloak ID first (most reliable link)
+        if (keycloakRoleId != null) {
+            roleEntity = findByKeycloakId(keycloakRoleId);
+        }
+
+        // 2. If not found by Keycloak ID, try to find by name, realm, and client (for realm roles, clientId is null)
+        if (roleEntity == null) {
+            if (clientId != null) { // It's a client role with a determined clientId
+                roleEntity = findClientRoleByName(realmId, clientId, roleName);
+            } else { // It's a realm role (or a client role whose clientId couldn't be determined)
+                roleEntity = findRealmRoleByName(realmId, roleName);
+            }
+        }
+
+        // 3. If still not found, create a new role entity
+        if (roleEntity == null) {
+            log.info("Role '{}' (Keycloak ID: {}) not found in database. Creating new role.",
+                    roleName, keycloakRoleId);
+            roleEntity = new Role();
+            roleEntity.setCreatedAt(Instant.now());
+            roleEntity.setCreatedBy("keycloak-sync"); // Or a more specific user
+        } else {
+            log.info("Role '{}' (ID: {}, Keycloak ID: {}) found. Synchronizing properties.",
+                    roleEntity.getName(), roleEntity.getId(), roleEntity.getKeycloakId());
+        }
+
+        // 4. Synchronize properties from Keycloak RoleModel to your Role entity
+        roleEntity.setName(roleName);
+        roleEntity.setDescription(roleModel.getDescription());
+        roleEntity.setRealmId(realmId);
+        roleEntity.setClientId(clientId); // Will be null for realm roles or if clientId couldn't be derived
+
+        // Set Keycloak ID if not already set or if it needs updating
+        if (roleEntity.getKeycloakId() == null || !roleEntity.getKeycloakId().equals(keycloakRoleId)) {
+            if (keycloakRoleId != null && isUUID(keycloakRoleId)) { // Only set if roleModel.getId() is a valid UUID
+                roleEntity.setKeycloakId(keycloakRoleId);
+            } else {
+                log.debug("RoleModel ID '{}' is not a raw UUID or is null. Not updating keycloakId field directly.", keycloakRoleId);
+            }
+        }
+
+        roleEntity.setUpdatedAt(Instant.now());
+        roleEntity.setUpdatedBy("keycloak-sync");
+
+        // 5. Save the synchronized role entity
+        return save(roleEntity); // Use your existing save method for persistence
+    }
+
+    // New method: Delete role by String ID (handles external Long or Keycloak UUID)
+    public void delete(String roleId) {
+        log.debug("RoleRepository.delete(id={})", roleId);
+        if (roleId == null || roleId.trim().isEmpty()) {
+            log.warn("Attempted to delete role with empty ID.");
+            return;
+        }
+
+        Role role = getById(roleId); // Use getById to find the role entity
+
+        if (role != null) {
+            delete(role); // Delegate to delete(Role entity)
+            log.info("Successfully deleted role with ID (external or keycloak): {}", roleId);
+        } else {
+            log.warn("Role not found for deletion with ID (external or keycloak): {}", roleId);
+        }
+    }
+
+    /**
+     * Removes all mappings from users to a specific role.
+     * Assumes 'roles_id' is the column name for the role's ID in the 'users_roles' join table.
+     *
+     * @param roleExternalId The external (Long) ID of the role.
+     */
+    public void removeUserMappingsForRole(String roleExternalId) {
+        log.debug("RoleRepository.removeUserMappingsForRole(roleExternalId={})", roleExternalId);
+        if (roleExternalId == null || roleExternalId.trim().isEmpty()) {
+            log.warn("Attempted to remove user mappings for empty roleExternalId.");
+            return;
+        }
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            em.createNativeQuery("DELETE FROM users_roles WHERE roles_id = :roleId")
+                    .setParameter("roleId", Long.valueOf(roleExternalId))
+                    .executeUpdate();
+            tx.commit();
+            log.info("Successfully removed user mappings for role (external ID) {}", roleExternalId);
+        } catch (NumberFormatException e) {
+            log.error("Invalid roleExternalId format for removeUserMappingsForRole: {}", roleExternalId, e);
+            if (tx.isActive()) tx.rollback();
+            throw e;
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to remove user mappings for role {}: {}", roleExternalId, e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    /**
+     * Removes all mappings from groups to a specific role.
+     * Assumes 'roles_id' is the column name for the role's ID in the 'groups_roles' join table.
+     *
+     * @param roleExternalId The external (Long) ID of the role.
+     */
+    public void removeGroupMappingsForRole(String roleExternalId) {
+        log.debug("RoleRepository.removeGroupMappingsForRole(roleExternalId={})", roleExternalId);
+        if (roleExternalId == null || roleExternalId.trim().isEmpty()) {
+            log.warn("Attempted to remove group mappings for empty roleExternalId.");
+            return;
+        }
+        EntityTransaction tx = em.getTransaction();
+        try {
+            tx.begin();
+            em.createNativeQuery("DELETE FROM groups_roles WHERE roles_id = :roleId")
+                    .setParameter("roleId", Long.valueOf(roleExternalId))
+                    .executeUpdate();
+            tx.commit();
+            log.info("Successfully removed group mappings for role (external ID) {}", roleExternalId);
+        } catch (NumberFormatException e) {
+            log.error("Invalid roleExternalId format for removeGroupMappingsForRole: {}", roleExternalId, e);
+            if (tx.isActive()) tx.rollback();
+            throw e;
+        } catch (Exception e) {
+            if (tx.isActive()) tx.rollback();
+            log.error("Failed to remove group mappings for role {}: {}", roleExternalId, e.getMessage(), e);
+            throw e;
+        }
+    }
+
 }

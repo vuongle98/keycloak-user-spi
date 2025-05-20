@@ -39,6 +39,9 @@ public class UserEntity implements Serializable {
     @Column(name = "keycloak_id", unique = true)
     private String keycloakId;
 
+    @Column(name = "realm_id")
+    private String realmId;
+
     @OneToOne(cascade = CascadeType.ALL, fetch = FetchType.EAGER)
     private UserProfile profile;
 

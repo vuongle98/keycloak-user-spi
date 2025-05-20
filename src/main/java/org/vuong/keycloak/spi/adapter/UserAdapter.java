@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.entity.*;
 import org.vuong.keycloak.spi.repository.GroupRepository; // Import GroupRepository
 import org.vuong.keycloak.spi.repository.RoleRepository; // Import RoleRepository
+import org.vuong.keycloak.spi.repository.UserRepository;
 
 import java.time.Instant;
 import java.util.*;
@@ -22,12 +23,21 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
     private final RealmModel realm;
     private final UserEntity userEntity;
     private final String keycloakId;
+    private final UserRepository userRepository;
     private final GroupRepository groupRepository; // Add GroupRepository field
     private final RoleRepository roleRepository; // Add RoleRepository field
     private final ComponentModel storageProviderModel; // Already exists, used for GroupAdapter
 
     // Update constructor to accept repositories
-    public UserAdapter(KeycloakSession session, RealmModel realm, ComponentModel model, UserEntity userEntity, GroupRepository groupRepository, RoleRepository roleRepository) {
+    public UserAdapter(
+            KeycloakSession session,
+            RealmModel realm,
+            ComponentModel model,
+            UserEntity userEntity,
+            GroupRepository groupRepository,
+            RoleRepository roleRepository,
+            UserRepository userRepository
+    ) {
         super(session, realm, model);
         this.session = session;
         this.realm = realm;
@@ -38,6 +48,7 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
         this.groupRepository = groupRepository; // Assign GroupRepository
         this.roleRepository = roleRepository; // Assign RoleRepository
         this.storageProviderModel = model; // Assign model
+        this.userRepository = userRepository;
     }
 
     @Override
@@ -255,10 +266,111 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
     @Override
     public Stream<GroupModel> getGroupsStream() {
         log.debug("UserAdapter.getGroupsStream() for user {}", getUsername());
-        // Correctly create GroupAdapter instances, passing all required dependencies
-        return userEntity.getGroups() != null ? userEntity.getGroups().stream()
-                .map(groupEntity -> new GroupAdapter(session, realm, groupEntity, groupRepository, roleRepository, storageProviderModel)) // Pass all dependencies
-                : Stream.empty();
+        if (userEntity.getGroups() == null) {
+            return Stream.empty();
+        }
+        return userEntity.getGroups().stream()
+                .map(groupEntity -> new GroupAdapter(session, realm, groupEntity, groupRepository, roleRepository, storageProviderModel));
+    }
+
+    @Override
+    public void joinGroup(GroupModel groupModel) { // Renamed parameter to groupModel for clarity
+        log.info("UserAdapter.joinGroup(): User '{}' (ID: {}) joining group '{}' (Keycloak ID: {})",
+                userEntity.getUsername(), userEntity.getId(), groupModel.getName(), groupModel.getId());
+
+        Group groupEntityToAdd = null;
+        try {
+            // Use the new syncGroup method to ensure the group exists and is up-to-date in your DB
+            groupEntityToAdd = groupRepository.syncGroup(realm.getId(), groupModel);
+        } catch (Exception e) {
+            log.error("Failed to sync group '{}' (Keycloak ID: {}) during user join: {}",
+                    groupModel.getName(), groupModel.getId(), e.getMessage(), e);
+            // Decide how to handle this error. Throwing an exception might prevent the user from being added in Keycloak.
+            // For now, we'll log and return, meaning the group won't be added to the user in your DB.
+            return;
+        }
+
+        if (groupEntityToAdd == null) {
+            log.warn("Failed to obtain or create group entity for group '{}' (Keycloak ID: {}). Cannot add user to group.",
+                    groupModel.getName(), groupModel.getId());
+            return;
+        }
+
+        // Check if the user is already a member of the group to avoid duplicates
+        if (userEntity.getGroups() != null && userEntity.getGroups().contains(groupEntityToAdd)) {
+            log.debug("User '{}' is already a member of group '{}'. No action needed.",
+                    userEntity.getUsername(), groupModel.getName());
+            return;
+        }
+
+        // Add the group entity to the user's collection
+        if (userEntity.getGroups() == null) {
+            userEntity.setGroups(new HashSet<>());
+        }
+        userEntity.getGroups().add(groupEntityToAdd);
+
+        // Update the user in your database
+        try {
+            userRepository.save(userEntity);
+            log.info("Successfully added user '{}' to group '{}' in database.", userEntity.getUsername(), groupEntityToAdd.getName());
+        } catch (Exception e) {
+            log.error("Failed to add user '{}' to group '{}' in database: {}", userEntity.getUsername(), groupEntityToAdd.getName(), e.getMessage(), e);
+            throw e; // Re-throw to indicate failure to Keycloak
+        }
+    }
+
+    @Override
+    public void leaveGroup(GroupModel group) {
+        log.info("UserAdapter.leaveGroup(): User '{}' (ID: {}) leaving group '{}' (ID: {})",
+                userEntity.getUsername(), userEntity.getId(), group.getName(), group.getId());
+
+        // Extract the external ID from the Keycloak GroupModel
+        String externalGroupIdString = StorageId.externalId(group.getId());
+        Long externalGroupId = null;
+        if (externalGroupIdString != null) {
+            try {
+                externalGroupId = Long.valueOf(externalGroupIdString);
+            } catch (NumberFormatException e) {
+                log.warn("Failed to parse external group ID '{}' as Long for group '{}'.", externalGroupIdString, group.getName());
+            }
+        }
+
+        // Find the group entity to remove. Priority: use external ID first, then Keycloak ID.
+        Group groupEntityToRemove = null;
+        if (externalGroupId != null) {
+            groupEntityToRemove = groupRepository.getById(String.valueOf(externalGroupId));
+        } else if (group.getId() != null) {
+            groupEntityToRemove = groupRepository.findByKeycloakId(group.getId());
+        }
+
+        if (groupEntityToRemove == null) {
+            log.warn("Attempted to remove user '{}' from non-existent or unmanageable group '{}' (Keycloak ID: {}).",
+                    userEntity.getUsername(), group.getName(), group.getId());
+            return;
+        }
+
+        // Remove the group entity from the user's collection
+        if (userEntity.getGroups() != null) {
+            boolean removed = userEntity.getGroups().remove(groupEntityToRemove);
+            if (!removed) {
+                log.debug("User '{}' was not a member of group '{}'. No action needed.",
+                        userEntity.getUsername(), group.getName());
+                return;
+            }
+        } else {
+            log.debug("User '{}' has no groups. No action needed for group '{}'.",
+                    userEntity.getUsername(), group.getName());
+            return;
+        }
+
+        // Update the user in your database
+        try {
+            userRepository.save(userEntity);
+            log.info("Successfully removed user '{}' from group '{}' in database.", userEntity.getUsername(), group.getName());
+        } catch (Exception e) {
+            log.error("Failed to remove user '{}' from group '{}' in database: {}", userEntity.getUsername(), group.getName(), e.getMessage(), e);
+            // You might want to throw a RuntimeException or handle this more gracefully
+        }
     }
 
     @Override
@@ -269,7 +381,7 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
         // Add roles directly assigned to the user
         if (userEntity.getRoles() != null) {
             roles.addAll(userEntity.getRoles().stream()
-                    .map(role -> new RoleAdapter(session, realm, role))
+                    .map(role -> new RoleAdapter(session, realm, storageProviderModel, role, roleRepository))
                     .collect(Collectors.toSet()));
         }
 
@@ -283,7 +395,7 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
                         // Assuming Group.getRoles() is available or lazily loaded:
                         return group.getRoles() != null ? group.getRoles().stream() : Stream.empty();
                     })
-                    .map(role -> new RoleAdapter(session, realm, role))
+                    .map(role -> new RoleAdapter(session, realm, storageProviderModel, role, roleRepository))
                     .collect(Collectors.toSet()));
         }
         log.debug("Found {} role mappings for user {}", roles.size(), getUsername());
@@ -319,12 +431,121 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
         return permissions;
     }
 
-    //    public Stream<PermissionAdapter> getPermissionStream() {
-    //        return getAllPermissions().stream()
-    //                .map(PermissionAdapter::new);
-    //    }
+    @Override
+    public boolean isMemberOf(GroupModel group) {
+        log.debug("UserAdapter.isMemberOf() for user {} and group {}", getUsername(), group.getName());
+        // Efficiently check if the user's group collection contains the group.
+        // First, resolve the GroupModel to your Group entity.
+        String externalGroupIdString = StorageId.externalId(group.getId());
+        Long externalGroupId = null;
+        if (externalGroupIdString != null) {
+            try {
+                externalGroupId = Long.valueOf(externalGroupIdString);
+            } catch (NumberFormatException e) {
+                // If it's not a Long, it might be a Keycloak UUID, try findByKeycloakId
+            }
+        }
 
-    // Optional: Override equals and hashCode if needed for consistent behavior
+        Group targetGroupEntity = null;
+        if (externalGroupId != null) {
+            targetGroupEntity = groupRepository.getById(String.valueOf(externalGroupId)); // Try by external Long ID
+        } else if (group.getId() != null) {
+            targetGroupEntity = groupRepository.findByKeycloakId(group.getId()); // Try by Keycloak UUID
+        }
+
+        if (targetGroupEntity == null) {
+            log.warn("Target group '{}' (Keycloak ID: {}) not found in repository for isMemberOf check.", group.getName(), group.getId());
+            return false;
+        }
+
+        return userEntity.getGroups() != null && userEntity.getGroups().contains(targetGroupEntity);
+    }
+
+    @Override
+    public void grantRole(RoleModel roleModel) {
+        log.info("UserAdapter.grantRole(): User '{}' (ID: {}) granting role '{}' (Keycloak ID: {})",
+                userEntity.getUsername(), userEntity.getId(), roleModel.getName(), roleModel.getId());
+
+        Role roleEntityToAdd = null;
+        try {
+            // Use the new syncRole method to ensure the role exists and is up-to-date in your DB
+            roleEntityToAdd = roleRepository.syncRole(realm.getId(), roleModel);
+        } catch (Exception e) {
+            log.error("Failed to sync role '{}' (Keycloak ID: {}) during user role grant: {}",
+                    roleModel.getName(), roleModel.getId(), e.getMessage(), e);
+            return; // Fail gracefully or re-throw based on desired behavior
+        }
+
+        if (roleEntityToAdd == null) {
+            log.warn("Failed to obtain or create role entity for role '{}' (Keycloak ID: {}). Cannot grant role to user.",
+                    roleModel.getName(), roleModel.getId());
+            return;
+        }
+
+        if (userEntity.getRoles() != null && userEntity.getRoles().contains(roleEntityToAdd)) {
+            log.debug("User '{}' already has role '{}'. No action needed.",
+                    userEntity.getUsername(), roleModel.getName());
+            return;
+        }
+
+        if (userEntity.getRoles() == null) {
+            userEntity.setRoles(new HashSet<>());
+        }
+        userEntity.getRoles().add(roleEntityToAdd);
+
+        try {
+            userRepository.save(userEntity);
+            log.info("Successfully granted user '{}' role '{}' in database.", userEntity.getUsername(), roleEntityToAdd.getName());
+        } catch (Exception e) {
+            log.error("Failed to grant user '{}' role '{}' in database: {}", userEntity.getUsername(), roleEntityToAdd.getName(), e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    @Override
+    public Stream<RoleModel> getRealmRoleMappingsStream() {
+        log.debug("UserAdapter.getRealmRoleMappingsStream() for user {}", getUsername());
+        if (userEntity.getRoles() == null) {
+            return Stream.empty();
+        }
+        return userEntity.getRoles().stream()
+                .filter(roleEntity -> roleEntity.getClientId() == null) // Filter for realm roles
+                .map(roleEntity -> new RoleAdapter(session, realm, storageProviderModel, roleEntity, roleRepository));
+    }
+
+    @Override
+    public Stream<RoleModel> getClientRoleMappingsStream(ClientModel client) {
+        log.debug("UserAdapter.getClientRoleMappingsStream() for user {} and client {}", getUsername(), client.getClientId());
+        if (userEntity.getRoles() == null) {
+            return Stream.empty();
+        }
+        return userEntity.getRoles().stream()
+                .filter(roleEntity -> client.getClientId().equals(roleEntity.getClientId())) // Filter for client roles
+                .map(roleEntity -> new RoleAdapter(session, realm, storageProviderModel, roleEntity, roleRepository));
+    }
+
+    @Override
+    public boolean hasRole(RoleModel roleModel) {
+        log.debug("UserAdapter.hasRole() for user {} and role {}", getUsername(), roleModel.getName());
+        Role targetRoleEntity = null;
+        if (roleModel.getId() != null) {
+            targetRoleEntity = roleRepository.findByKeycloakId(roleModel.getId());
+        }
+        if (targetRoleEntity == null) {
+            String externalRoleIdString = StorageId.externalId(roleModel.getId());
+            if (externalRoleIdString != null) {
+                targetRoleEntity = roleRepository.getById(externalRoleIdString);
+            }
+        }
+
+        if (targetRoleEntity == null) {
+            log.warn("Target role '{}' (Keycloak ID: {}) not found in repository for hasRole check.", roleModel.getName(), roleModel.getId());
+            return false;
+        }
+        return userEntity.getRoles() != null && userEntity.getRoles().contains(targetRoleEntity);
+    }
+
+        // Optional: Override equals and hashCode if needed for consistent behavior
     // AbstractUserAdapterFederatedStorage provides basic implementations,
     // but you might want to use the external entity ID for robustness.
     @Override

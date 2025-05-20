@@ -38,7 +38,7 @@ public class Group implements Serializable {
     @Column(name = "keycloak_id", unique = true)
     private String keycloakId;
 
-    @Column(name = "realm_id", nullable = false)
+    @Column(name = "realm_id")
     private String realmId;
 
     @ManyToMany(fetch = FetchType.LAZY)

@@ -13,9 +13,7 @@ import org.vuong.keycloak.spi.repository.RoleRepository;
 
 import java.util.*;
 import java.util.stream.Stream;
-import java.util.stream.Collectors;
 import java.util.Objects;
-import java.util.Comparator;
 
 // Implement GroupModel directly
 public class GroupAdapter implements GroupModel {
@@ -296,7 +294,7 @@ public class GroupAdapter implements GroupModel {
         logger.debug("GroupAdapter.getRoleMappingsStream() for group {}", getId());
         if (groupEntity.getRoles() != null) {
             return groupEntity.getRoles().stream()
-                    .map(role -> new RoleAdapter(session, realm, role));
+                    .map(role -> new RoleAdapter(session, realm, storageProviderModel, role, roleRepository));
         }
         return Stream.empty();
     }

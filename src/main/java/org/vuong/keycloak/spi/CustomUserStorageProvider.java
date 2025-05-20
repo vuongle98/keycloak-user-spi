@@ -8,20 +8,21 @@ import org.keycloak.models.UserCredentialModel;
 import org.keycloak.models.credential.PasswordCredentialModel;
 import org.keycloak.storage.StorageId;
 import org.keycloak.storage.UserStorageProvider;
+import org.keycloak.storage.federated.UserFederatedStorageProvider;
+import org.keycloak.storage.federated.UserGroupMembershipFederatedStorage;
 import org.keycloak.storage.user.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.vuong.keycloak.spi.adapter.UserAdapter; // Import UserAdapter
-import org.vuong.keycloak.spi.entity.Group; // Keep if needed for preRemove or user-centric assignments
-import org.vuong.keycloak.spi.entity.Role; // Keep if needed for preRemove or user-centric assignments
-import org.vuong.keycloak.spi.entity.UserEntity; // Keep if needed for provider methods
-import org.vuong.keycloak.spi.repository.GroupRepository; // Keep if needed for preRemove or user-centric assignments
-import org.vuong.keycloak.spi.repository.RoleRepository; // Keep if needed for preRemove or user-centric assignments
-import org.vuong.keycloak.spi.repository.UserRepository; // Keep if needed for provider methods
-import org.vuong.keycloak.spi.util.PasswordUtil; // Keep if needed for credential validation
+import org.vuong.keycloak.spi.adapter.UserAdapter;
+import org.vuong.keycloak.spi.entity.Group;
+import org.vuong.keycloak.spi.entity.Role;
+import org.vuong.keycloak.spi.entity.UserEntity;
+import org.vuong.keycloak.spi.repository.GroupRepository;
+import org.vuong.keycloak.spi.repository.RoleRepository;
+import org.vuong.keycloak.spi.repository.UserRepository;
+import org.vuong.keycloak.spi.util.PasswordUtil;
 
 import java.util.*;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class CustomUserStorageProvider implements
@@ -38,10 +39,11 @@ public class CustomUserStorageProvider implements
     private final KeycloakSession session;
     private final ComponentModel model;
     private final UserRepository userRepository;
-    private final RoleRepository roleRepository; // Needed to pass to UserAdapter
-    private final GroupRepository groupRepository; // Needed to pass to UserAdapter
+    private final RoleRepository roleRepository; // Needed for user-centric and provider role methods
+    private final GroupRepository groupRepository; // Needed for user-centric and provider group methods
 
 
+    // Constructor now accepts all repositories
     public CustomUserStorageProvider(KeycloakSession session, ComponentModel model, UserRepository userRepository, RoleRepository roleRepository, GroupRepository groupRepository) {
         this.session = session;
         this.model = model;
@@ -56,31 +58,28 @@ public class CustomUserStorageProvider implements
     }
 
     // --- User Lookup Provider implementation ---
+    // (Keep methods from the previous CustomUserStorageProvider)
+
     @Override
     public UserModel getUserById(RealmModel realm, String id) {
         logger.info("getUserById received raw id: {}", id);
-
         String externalId = StorageId.externalId(id);
         UserEntity entity = null;
-
         if (externalId != null) {
             logger.info("Attempting lookup by external ID: {}", externalId);
-            entity = userRepository.getById(externalId); // getById attempts Long conversion internally
+            entity = userRepository.getById(externalId);
         } else {
             logger.info("External ID extraction returned null for id: {}", id);
             logger.info("Attempting lookup by Keycloak ID: {}", id);
-            entity = userRepository.findByKeycloakId(id); // New method to find by Keycloak UUID
+            entity = userRepository.findByKeycloakId(id);
         }
-
-
         if (entity == null) {
             logger.warn("User not found with ID (external or keycloak): {}", id);
             return null;
         }
-
         logger.info("Found user entity with ID: {}", entity.getId());
-        // Create UserAdapter, passing groupRepository and roleRepository
-        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository);
+        // Pass all necessary repositories to the UserAdapter constructor
+        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository);
     }
 
     @Override
@@ -91,8 +90,8 @@ public class CustomUserStorageProvider implements
             logger.warn("User not found with username: {}", username);
             return null;
         }
-        // Create UserAdapter, passing groupRepository and roleRepository
-        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository);
+        // Pass all necessary repositories to the UserAdapter constructor
+        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository);
     }
 
     @Override
@@ -103,11 +102,13 @@ public class CustomUserStorageProvider implements
             logger.warn("User not found with email: {}", email);
             return null;
         }
-        // Create UserAdapter, passing groupRepository and roleRepository
-        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository);
+        // Pass all necessary repositories to the UserAdapter constructor
+        return new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository);
     }
 
     // --- User Query Provider implementation ---
+    // (Keep methods from the previous CustomUserStorageProvider)
+
     @Override
     public Stream<UserModel> searchForUserStream(RealmModel realm, Map<String, String> params, Integer firstResult, Integer maxResults) {
         logger.info("Searching for users: realm={}, params={}, firstResult={}, maxResults={}", realm.getId(), params, firstResult, maxResults);
@@ -117,28 +118,32 @@ public class CustomUserStorageProvider implements
 
         return userRepository.search(search, username, email, firstResult, maxResults)
                 .stream()
-                // Create UserAdapter, passing groupRepository and roleRepository
-                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository));
+                // Pass all necessary repositories to the UserAdapter constructor
+                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository));
     }
 
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group, Integer firstResult, Integer maxResults) {
-        String keycloakGroupId = group.getId();
+        String keycloakGroupId = group.getId(); // This is Keycloak's ID for the group
         logger.info("Fetching members for group: realm={}, keycloakGroupId={}", realm.getId(), keycloakGroupId);
 
-        Group groupEntity = groupRepository.getById(keycloakGroupId);
+        // This call is crucial: it should resolve keycloakGroupId to your internal Group entity
+        Group groupEntity = groupRepository.getById(keycloakGroupId); // getById handles both external Long and Keycloak UUID
 
         if (groupEntity == null) {
             logger.warn("Group entity not found for Keycloak ID: {}. Cannot fetch members.", keycloakGroupId);
-            return Stream.empty();
+            return Stream.empty(); // Return empty stream if group not found
         }
 
+        // Assuming groupEntity.getId() is the external Long ID you use in your DB for user-group mapping
         String externalGroupId = String.valueOf(groupEntity.getId());
+        logger.info("Resolved group Keycloak ID {} to external ID {}. Fetching users for this group.", keycloakGroupId, externalGroupId);
 
+        // Call UserRepository with the external ID of your group
         return userRepository.findUsersByGroupId(realm.getId(), externalGroupId, firstResult, maxResults)
                 .stream()
-                // Create UserAdapter, passing groupRepository and roleRepository
-                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository));
+                // Pass all necessary repositories to the UserAdapter constructor
+                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository)); // <--- IMPORTANT: ensure userRepository is passed here
     }
 
     @Override
@@ -146,8 +151,8 @@ public class CustomUserStorageProvider implements
         logger.info("Searching for user by attribute: realm={}, attrName={}, attrValue={}", realm.getId(), attrName, attrValue);
         return userRepository.findUsersByAttribute(realm.getId(), attrName, attrValue)
                 .stream()
-                // Create UserAdapter, passing groupRepository and roleRepository
-                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository));
+                // Pass all necessary repositories to the UserAdapter constructor
+                .map(entity -> new UserAdapter(session, realm, model, entity, groupRepository, roleRepository, userRepository));
     }
 
     @Override
@@ -168,16 +173,12 @@ public class CustomUserStorageProvider implements
         user.setUsername(username);
         user.setLocked(false);
         // user.setRealmId(realm.getId()); // Assuming UserEntity has a realmId field
-
-        // TODO: Handle UserProfile creation for the new user if required upon user creation
-        // user.setProfile(new UserProfile()); // Example if UserProfile is always present
+        // TODO: Handle UserProfile creation
 
         try {
             UserEntity createdUser = userRepository.save(user);
-
-            // Create UserModel, passing groupRepository and roleRepository
-            UserModel newUserModel = new UserAdapter(session, realm, model, createdUser, groupRepository, roleRepository);
-
+            // Pass all necessary repositories to the UserAdapter constructor
+            UserModel newUserModel = new UserAdapter(session, realm, model, createdUser, groupRepository, roleRepository, userRepository);
             String keycloakUserId = newUserModel.getId();
             if (keycloakUserId != null) {
                 UserEntity managedUser = userRepository.getById(String.valueOf(createdUser.getId()));
@@ -191,9 +192,7 @@ public class CustomUserStorageProvider implements
             } else {
                 logger.warn("Keycloak did not provide a UUID for newly created user {}", createdUser.getUsername());
             }
-
             logger.info("Successfully created user: {} with id {}", user.getUsername(), user.getId());
-
             return newUserModel;
         } catch (Exception e) {
             logger.error("Failed to create user {}: {}", username, e.getMessage(), e);
@@ -217,6 +216,8 @@ public class CustomUserStorageProvider implements
     }
 
     // --- Credential Input Validator implementation ---
+    // (Keep methods from the previous CustomUserStorageProvider)
+
     @Override
     public boolean supportsCredentialType(String credentialType) {
         return PasswordCredentialModel.TYPE.equals(credentialType);
@@ -229,7 +230,6 @@ public class CustomUserStorageProvider implements
         }
         String userId = user.getId();
         UserEntity entity = null;
-
         String externalId = StorageId.externalId(userId);
         if (externalId != null) {
             entity = userRepository.getById(externalId);
@@ -237,7 +237,6 @@ public class CustomUserStorageProvider implements
         if (entity == null) {
             entity = userRepository.findByKeycloakId(userId);
         }
-
         return entity != null && entity.getPassword() != null && !entity.getPassword().isEmpty();
     }
 
@@ -249,7 +248,6 @@ public class CustomUserStorageProvider implements
         }
         String userId = user.getId();
         UserEntity entity = null;
-
         String externalId = StorageId.externalId(userId);
         if (externalId != null) {
             entity = userRepository.getById(externalId);
@@ -257,8 +255,6 @@ public class CustomUserStorageProvider implements
         if (entity == null) {
             entity = userRepository.findByKeycloakId(userId);
         }
-
-
         if (entity == null || entity.getPassword() == null || entity.getPassword().isEmpty()) {
             logger.warn("User {} (ID: {}) not found or has no password set for validation.", user.getUsername(), userId);
             return false;
@@ -273,25 +269,24 @@ public class CustomUserStorageProvider implements
     }
 
     // --- User Bulk Update Provider implementation ---
+    // (Keep methods from the previous CustomUserStorageProvider)
+
     @Override
     public void preRemove(RealmModel realm) {
         logger.info("Pre-remove realm: {}. Triggering cleanup in user storage.", realm.getId());
         try {
             userRepository.deleteAllUsersByRealm(realm.getId());
             logger.info("Successfully triggered user deletion for realm: {}", realm.getId());
-
         } catch (Exception e) {
             logger.error("Failed to perform pre-remove cleanup for realm {} in User provider: {}", realm.getId(), e.getMessage(), e);
         }
     }
-
 
     @Override
     public void preRemove(RealmModel realm, GroupModel group) {
         String keycloakGroupId = group.getId();
         logger.info("Pre-remove group: {} ({}) from realm: {}. Triggering cleanup in user storage.", group.getName(), keycloakGroupId, realm.getId());
         Group groupEntity = groupRepository.getById(keycloakGroupId);
-
         if (groupEntity != null) {
             String externalGroupId = String.valueOf(groupEntity.getId());
             try {
@@ -317,59 +312,8 @@ public class CustomUserStorageProvider implements
         }
     }
 
-    // --- User-centric Assignment Methods (Stay here) ---
-    // Methods like add/remove user-role, add/remove user-group memberships would be implemented here
-    // using userRepository and potentially roleRepository/groupRepository to update the join tables.
-    // Example implementations are commented out below.
+    @Override
+    public void grantToAllUsers(RealmModel realm, RoleModel role) {
 
-    // @Override
-    // public void grantRole(UserModel user, RoleModel role) { ... }
-    //
-    // @Override
-    // public void deleteRoleMapping(UserModel user, RoleModel role) { ... }
-    //
-    // @Override
-    // public void addToGroup(UserModel user, GroupModel group) { ... }
-    //
-    // @Override
-    // public void removeFromGroup(UserModel user, GroupModel group) { ... }
-
-    // --- RoleProvider method grantToAllUsers (Remains here) ---
-    public void grantToAllUsers(RealmModel realm, RoleModel roleModel) {
-        logger.info("Granting role {} to all users in realm {}", roleModel.getId(), realm.getId());
-
-        String roleId = StorageId.externalId(roleModel.getId());
-        Role roleEntity = roleRepository.getById(roleId);
-
-        if (roleEntity == null) {
-            logger.warn("Role not found for granting to all users with ID: {}", roleId);
-            return;
-        }
-
-        int batchSize = 100;
-        int firstResult = 0;
-        List<UserEntity> users;
-        do {
-            users = userRepository.getAllUsers(realm.getId(), firstResult, batchSize);
-            if (users == null || users.isEmpty()) {
-                break;
-            }
-
-            for (UserEntity user : users) {
-                logger.debug("Granting role {} to user {}", roleEntity.getName(), user.getUsername());
-                if (user.getRoles() == null) {
-                    user.setRoles(new HashSet<>());
-                }
-                user.getRoles().add(roleEntity);
-                logger.debug("Saving user {} after granting role", user.getUsername());
-                userRepository.save(user);
-            }
-
-            firstResult += batchSize;
-        } while (users.size() == batchSize);
-
-        logger.info("Finished attempting to grant role {} to all users in realm {}", roleId, realm.getId());
     }
-
-    // TODO: Implement removeRoleFromAllUsers(RealmModel realm, RoleModel role)
 }
