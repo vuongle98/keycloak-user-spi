@@ -1,84 +1,95 @@
 package org.vuong.keycloak.spi;
 
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.SharedCacheMode;
-import jakarta.persistence.ValidationMode;
-import jakarta.persistence.spi.ClassTransformer;
-import jakarta.persistence.spi.PersistenceUnitInfo;
-import jakarta.persistence.spi.PersistenceUnitTransactionType;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
-import org.keycloak.provider.Provider;
 import org.keycloak.provider.ProviderConfigProperty;
-import org.keycloak.provider.ProviderConfigurationBuilder; // Import ProviderConfigurationBuilder
-import org.keycloak.storage.UserStorageProvider;
+import org.keycloak.provider.ProviderConfigurationBuilder;
 import org.keycloak.storage.UserStorageProviderFactory;
-import org.keycloak.storage.group.GroupLookupProvider; // Keep if needed for imports/references
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.vuong.keycloak.spi.config.JpaProvider;
-import org.vuong.keycloak.spi.entity.UserEntity; // Keep if needed for imports/references
-import org.vuong.keycloak.spi.repository.GroupRepository; // Keep if needed for imports/references
-import org.vuong.keycloak.spi.repository.RoleRepository; // Keep if needed for imports/references
-import org.vuong.keycloak.spi.repository.UserProfileRepository;
-import org.vuong.keycloak.spi.repository.UserRepository;
-// Removed imports for GroupRepository and RoleRepository
 
-import javax.sql.DataSource;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.URL;
-import java.util.*;
+import java.util.List;
 
 public class CustomUserStorageProviderFactory implements
         UserStorageProviderFactory<CustomUserStorageProvider> {
 
     private static final Logger log = LoggerFactory.getLogger(CustomUserStorageProviderFactory.class);
 
-    // Correct way to define an empty list of configuration properties
-    protected static final List<ProviderConfigProperty> configMetadata = ProviderConfigurationBuilder.create().build();
+    public static final String PROVIDER_ID = "user-jpa-provider";
 
-    // Add any user-specific config properties here if needed
-    // static {
-    //     configMetadata.add(new ProviderConfigProperty("some.user.property", "Some User Property", "Description", ProviderConfigProperty.STRING_TYPE, ""));
-    // }
+    // Configuration property keys
+    public static final String CONFIG_KEY_JDBC_URL = "jdbcUrl";
+    public static final String CONFIG_KEY_DB_USERNAME = "dbUsername";
+    public static final String CONFIG_KEY_DB_PASSWORD = "dbPassword";
+    public static final String CONFIG_KEY_DIALECT = "dialect";
 
+    private static final List<ProviderConfigProperty> configMetadata;
+
+    static {
+        configMetadata = ProviderConfigurationBuilder.create()
+                .property()
+                .name(CONFIG_KEY_JDBC_URL)
+                .label("JDBC Connection URL")
+                .helpText("The JDBC URL to connect to the database.")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .required(true)
+                .add()
+                .property()
+                .name(CONFIG_KEY_DB_USERNAME)
+                .label("Database Username")
+                .helpText("The username to connect to the database.")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .required(true)
+                .add()
+                .property()
+                .name(CONFIG_KEY_DB_PASSWORD)
+                .label("Database Password")
+                .helpText("The password to connect to the database.")
+                .type(ProviderConfigProperty.PASSWORD)
+                .required(true)
+                .add()
+                .property()
+                .name(CONFIG_KEY_DIALECT)
+                .label("JPA Dialect")
+                .helpText("The JPA dialect to use (e.g., org.hibernate.dialect.PostgreSQLDialect).")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .required(true)
+                .add()
+                .build();
+    }
 
     @Override
     public CustomUserStorageProvider create(KeycloakSession session, ComponentModel model) {
-        log.info("CustomUserStorageProviderFactory.create()");
-        // Obtain EntityManager - reuse your JpaProvider utility
-        EntityManager em = JpaProvider.getSession(); // Assuming getSession returns EntityManager or Session that can be adapted
+        log.info("CustomUserStorageProviderFactory.create() - Component Model ID: {}", model.getId());
 
-        // Instantiate the repositories needed by the User provider
-        UserRepository userRepository = new UserRepository(em);
-        RoleRepository roleRepository = new RoleRepository(em); // Needed for user-role assignment methods
-        GroupRepository groupRepository = new GroupRepository(em); // Needed for user-group assignment methods
-        UserProfileRepository profileRepository = new UserProfileRepository(em); // Needed for user-group assignment methods
+        // Retrieve configuration from the ComponentModel
+        String jdbcUrl = model.getConfig().getFirst(CONFIG_KEY_JDBC_URL);
+        String dbUsername = model.getConfig().getFirst(CONFIG_KEY_DB_USERNAME);
+        String dbPassword = model.getConfig().getFirst(CONFIG_KEY_DB_PASSWORD);
+        String dialect = model.getConfig().getFirst(CONFIG_KEY_DIALECT);
 
-        // Pass repositories to the provider
-        return new CustomUserStorageProvider(session, model, userRepository, roleRepository, groupRepository, profileRepository);
+        log.debug("Configuration - JDBC URL: {}, Username: {}, Dialect: {}", jdbcUrl, dbUsername, dialect);
+
+        // Initialize your JpaProvider with the dynamic configuration
+        EntityManager em = JpaProvider.getEntityManager(jdbcUrl, dbUsername, dbPassword, dialect);
+
+        // Pass the EntityManager and the ComponentModel (containing the config) to the provider
+        return new CustomUserStorageProvider(session, model, em);
     }
-
-    // The getPersistenceUnitInfo method is typically needed if the factory is responsible for creating the EntityManagerFactory/PersistenceUnit.
-    // If JpaProvider handles this based on a separate configuration (like persistence.xml), this method might not be necessary in the factory.
-    // If you uncomment it, ensure it's fully implemented and correctly provides the PersistenceUnitInfo.
-//    private PersistenceUnitInfo getPersistenceUnitInfo(String name) {
-//       // ... (implementation as before)
-//    }
 
     @Override
     public String getId() {
-        log.info("CustomUserStorageProviderFactory.getId()");
-        return "user-jpa-provider"; // Unique ID for this provider type
+        return PROVIDER_ID;
     }
 
     @Override
     public String getHelpText() {
-        return "JPA User Storage Provider";
+        return "JPA User Storage Provider with Dynamic Database Configuration";
     }
 
-    @Override // Uncommented and returning the empty list
+    @Override
     public List<ProviderConfigProperty> getConfigProperties() {
         return configMetadata;
     }

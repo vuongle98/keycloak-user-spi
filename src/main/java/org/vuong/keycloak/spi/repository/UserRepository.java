@@ -136,6 +136,80 @@ public class UserRepository {
         return query.getResultList();
     }
 
+    public List<UserEntity> search(String realmId, String search, String username, String email,
+                                   String firstName, String lastName, Boolean exact, Boolean emailVerified,
+                                   Boolean enabled, String idpAlias, String idpUserId,
+                                   Integer firstResult, Integer maxResults) {
+        log.debug("UserRepository.search(...)");
+        CriteriaBuilder cb = em.getCriteriaBuilder();
+        CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+        Root<UserEntity> root = cq.from(UserEntity.class);
+        List<Predicate> predicates = new ArrayList<>();
+
+        predicates.add(cb.equal(root.get("realmId"), realmId));
+
+        if (search != null && !search.isEmpty()) {
+            Predicate searchPredicate = cb.or(
+                    buildLikePredicate(cb, root.get("username"), search, exact),
+                    buildLikePredicate(cb, root.get("email"), search, exact),
+                    buildLikePredicate(cb, root.get("firstName"), search, exact),
+                    buildLikePredicate(cb, root.get("lastName"), search, exact)
+            );
+            predicates.add(searchPredicate);
+        } else {
+            if (username != null && !username.isEmpty()) {
+                predicates.add(buildLikePredicate(cb, root.get("username"), username, exact));
+            }
+            if (email != null && !email.isEmpty()) {
+                predicates.add(buildLikePredicate(cb, root.get("email"), email, exact));
+            }
+            if (firstName != null && !firstName.isEmpty()) {
+                predicates.add(buildLikePredicate(cb, root.get("firstName"), firstName, exact));
+            }
+            if (lastName != null && !lastName.isEmpty()) {
+                predicates.add(buildLikePredicate(cb, root.get("lastName"), lastName, exact));
+            }
+        }
+
+        if (emailVerified != null) {
+            predicates.add(cb.equal(root.get("emailVerified"), emailVerified));
+        }
+        if (enabled != null) {
+            predicates.add(cb.equal(root.get("enabled"), enabled));
+        }
+        if (idpAlias != null && !idpAlias.isEmpty()) {
+            // Assuming you have a way to join with federated identities
+            // This is a simplified example and might need adjustments based on your entity model
+            // predicates.add(cb.equal(root.join("federatedIdentities").get("identityProviderId"), idpAlias));
+            log.warn("IDP Alias search not fully implemented in this example.");
+        }
+        if (idpUserId != null && !idpUserId.isEmpty()) {
+            // Assuming you have a way to join with federated identities
+            // This is a simplified example and might need adjustments based on your entity model
+            // predicates.add(cb.equal(root.join("federatedIdentities").get("userId"), idpUserId));
+            log.warn("IDP User ID search not fully implemented in this example.");
+        }
+
+        cq.where(cb.and(predicates.toArray(new Predicate[0])));
+
+        TypedQuery<UserEntity> query = em.createQuery(cq);
+        if (firstResult != null) {
+            query.setFirstResult(firstResult);
+        }
+        if (maxResults != null) {
+            query.setMaxResults(maxResults);
+        }
+        return query.getResultList();
+    }
+
+    private Predicate buildLikePredicate(CriteriaBuilder cb, jakarta.persistence.criteria.Expression<String> field, String value, Boolean exact) {
+        if (exact != null && exact) {
+            return cb.equal(field, value);
+        } else {
+            return cb.like(cb.lower(field), "%" + value.toLowerCase() + "%");
+        }
+    }
+
 
     public UserEntity getById(String id) {
         log.debug("UserRepository.getById({})", id);
@@ -557,6 +631,88 @@ public class UserRepository {
         }
 
         return query.getResultList();
+    }
+
+    /**
+     * Finds a list of UserEntities that are directly associated with a given Keycloak Role ID.
+     *
+     * @param realmId       The Keycloak realm ID.
+     * @param keycloakRoleId The Keycloak ID of the role.
+     * @param firstResult   The index of the first result to retrieve (for pagination).
+     * @param maxResults    The maximum number of results to retrieve (for pagination).
+     * @return A list of UserEntities associated with the role, within the specified range.
+     */
+    public List<UserEntity> findUsersByRealmAndRole(String realmId, String keycloakRoleId, Integer firstResult, Integer maxResults) {
+        log.debug("UserRepository.findUsersByRealmAndRole(realmId={}, keycloakRoleId={}, firstResult={}, maxResults={})", realmId, keycloakRoleId, firstResult, maxResults);
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<UserEntity> cq = cb.createQuery(UserEntity.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+
+            Join<UserEntity, Group> rolesJoin = root.join("roles", JoinType.LEFT);
+            // Join with the roles collection
+
+            List<Predicate> predicates = new ArrayList<>();
+
+            predicates.add(cb.equal(rolesJoin.get("realmId"), realmId)); // Filter by realm
+            predicates.add(cb.equal(rolesJoin.get("keycloakId"), keycloakRoleId)); // Filter by the external group ID via the join
+
+            cq.where(cb.and(predicates.toArray(new Predicate[0])));
+
+            TypedQuery<UserEntity> query = em.createQuery(cq);
+            if (firstResult != null) {
+                query.setFirstResult(firstResult);
+            }
+            if (maxResults != null) {
+                query.setMaxResults(maxResults);
+            }
+            return query.getResultList();
+        } catch (Exception e) {
+            log.error("Error finding users by realm {} and role {}: {}", realmId, keycloakRoleId, e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Finds a list of UserEntities that are directly associated with a given Keycloak Role ID (without pagination).
+     *
+     * @param realmId       The Keycloak realm ID.
+     * @param keycloakRoleId The Keycloak ID of the role.
+     * @return A list of UserEntities associated with the role.
+     */
+    public List<UserEntity> findUsersByRealmAndRole(String realmId, String keycloakRoleId) {
+        return findUsersByRealmAndRole(realmId, keycloakRoleId, null, null);
+    }
+
+    /**
+     * Counts the number of UserEntities that are directly associated with a given Keycloak Role ID.
+     *
+     * @param realmId       The Keycloak realm ID.
+     * @param keycloakRoleId The Keycloak ID of the role.
+     * @return The total number of users associated with the role.
+     */
+    public long countUsersByRealmAndRole(String realmId, String keycloakRoleId) {
+        log.debug("UserRepository.countUsersByRealmAndRole(realmId={}, keycloakRoleId={})", realmId, keycloakRoleId);
+        try {
+            CriteriaBuilder cb = em.getCriteriaBuilder();
+            CriteriaQuery<Long> cq = cb.createQuery(Long.class);
+            Root<UserEntity> root = cq.from(UserEntity.class);
+            // Join with the roles collection
+            Join<UserEntity, Group> rolesJoin = root.join("roles", JoinType.LEFT);
+
+            List<Predicate> predicates = new ArrayList<>();
+
+            predicates.add(cb.equal(rolesJoin.get("realmId"), realmId));
+            predicates.add(cb.equal(rolesJoin.get("r").get("keycloakId"), keycloakRoleId));
+
+            cq.where(cb.and(predicates.toArray(new Predicate[0])));
+
+            cq.select(cb.count(root));
+            return em.createQuery(cq).getSingleResult();
+        } catch (Exception e) {
+            log.error("Error counting users by realm {} and role {}: {}", realmId, keycloakRoleId, e.getMessage(), e);
+            return 0;
+        }
     }
 
 }

@@ -654,4 +654,10 @@ public class RoleRepository {
         }
     }
 
+    // Existing methods (getById, findByName, findRealmRoleByName, findClientRoleByName, search, searchRealmRoles,
+    // searchClientRoles, searchClientRolesByClientIds, searchClientRolesExcludingClientIds, getAllRoles,
+    // getRealmRoles, getClientRoles, getRolesByIdsOrSearch, save, delete(Role), deleteAllRealmRoles,
+    // deleteAllClientRoles, findByKeycloakId, syncRole, delete(String), removeUserMappingsForRole,
+    // removeGroupMappingsForRole, isUUID) remain as they were.
+
 }

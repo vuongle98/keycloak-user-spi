@@ -381,7 +381,17 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
         // Add roles directly assigned to the user
         if (userEntity.getRoles() != null) {
             roles.addAll(userEntity.getRoles().stream()
-                    .map(role -> new RoleAdapter(session, realm, storageProviderModel, role, roleRepository))
+                    .map(roleEntity -> {
+                        String keycloakRoleId = roleEntity.getKeycloakId(); // Try to use the existing Keycloak ID
+
+                        if (keycloakRoleId != null) {
+                            return session.roles().getRoleById(realm, keycloakRoleId);
+                        } else {
+                            // This scenario ideally shouldn't happen for roles managed by your provider
+                            return null;
+                        }
+                    })
+                    .filter(Objects::nonNull)
                     .collect(Collectors.toSet()));
         }
 
@@ -389,16 +399,21 @@ public class UserAdapter extends AbstractUserAdapterFederatedStorage {
         if (userEntity.getGroups() != null) {
             roles.addAll(userEntity.getGroups().stream()
                     .flatMap(group -> {
-                        // Access roles from the GroupAdapter, which should fetch them from the DB
-                        // This might require the Group entity's roles collection to be loaded or lazy-loaded within the adapter method
-                        // Or use groupRepository to get roles for the group.
-                        // Assuming Group.getRoles() is available or lazily loaded:
                         return group.getRoles() != null ? group.getRoles().stream() : Stream.empty();
                     })
-                    .map(role -> new RoleAdapter(session, realm, storageProviderModel, role, roleRepository))
+                    .map(roleEntity -> {
+                        String keycloakRoleId = roleEntity.getKeycloakId(); // Try to use the existing Keycloak ID
+
+                        if (keycloakRoleId != null) {
+                            return session.roles().getRoleById(realm, keycloakRoleId);
+                        } else {
+                            return null;
+                        }
+                    })
+                    .filter(Objects::nonNull)
                     .collect(Collectors.toSet()));
         }
-        log.debug("Found {} role mappings for user {}", roles.size(), getUsername());
+
         return roles.stream();
     }
 
