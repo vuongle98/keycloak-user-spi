@@ -61,6 +61,13 @@ tasks.register("copyJdbcDriver",  Copy) {
     include 'postgresql-*.jar'
 }
 
+tasks.register("copyJbcryptLib", Copy) {
+    from configurations.runtimeClasspath
+    into "$buildDir/libs/libs"
+    include 'jbcrypt-*.jar'
+}
+
+
 test {
     useJUnitPlatform()
 }
