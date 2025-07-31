@@ -8,13 +8,12 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.storage.StorageId; // Import StorageId
 import org.slf4j.Logger; // Import Logger
 import org.slf4j.LoggerFactory; // Import LoggerFactory
+import org.vuong.keycloak.spi.entity.Permission;
 import org.vuong.keycloak.spi.entity.Role;
 import org.vuong.keycloak.spi.repository.RoleRepository; // Keep this if used for other RoleModel methods
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class RoleAdapter implements RoleModel {
@@ -142,8 +141,21 @@ public class RoleAdapter implements RoleModel {
 
     @Override
     public void setAttribute(String name, List<String> values) {
-        log.warn("RoleAdapter: setAttribute('{}', {}) not implemented for role '{}'.", name, values, getName());
-        // Implement if your Role entity supports generic attributes
+        if ("application_permissions".equals(name)) {
+            // This is tricky. Your permissions are derived from DB relations.
+            // Allowing Keycloak to set them directly as a string list means you'd have to:
+            // 1. Find/create PermissionEntity objects based on the names in 'values'.
+            // 2. Update the RoleEntity's collection of PermissionEntity.
+            // 3. Persist RoleEntity.
+            // For simplicity, you might make this read-only from Keycloak's perspective for this specific key.
+            log.warn("Attempted to set 'application_permissions' attribute for role {}. This is derived from database relations and is typically read-only via this SPI attribute mechanism.", getName());
+            // If you choose to implement, be very careful with data integrity.
+            return;
+        }
+        // Handle other attributes if your RoleEntity supports them directly
+        // e.g., roleEntity.getCustomAttributes().put(name, values);
+        // roleRepository.save(roleEntity);
+        log.debug("Set attribute '{}' for role {}", name, getName());
     }
 
     @Override
@@ -161,9 +173,19 @@ public class RoleAdapter implements RoleModel {
 
     @Override
     public Map<String, List<String>> getAttributes() {
-        log.warn("RoleAdapter: getAttributes() not implemented for role '{}'. Returning empty map.", getName());
-        // Implement if your Role entity supports generic attributes
-        return Collections.emptyMap();
+        // Get existing attributes if your RoleEntity supports a generic attribute map
+        // or if your base adapter handles some.
+        Map<String, List<String>> attributes = new HashMap<>(); // Start fresh or from super.getAttributes()
+
+        // Add your custom application permissions
+        if (role.getPermissions() != null && !role.getPermissions().isEmpty()) {
+            List<String> permissionNames = role.getPermissions().stream()
+                    .map(Permission::getCode) // Assuming PermissionEntity has getName()
+                    .collect(Collectors.toList());
+            attributes.put("application_permissions", permissionNames);
+            log.debug("Exposing application_permissions for role {}: {}", getName(), permissionNames);
+        }
+        return attributes;
     }
 
     @Override
